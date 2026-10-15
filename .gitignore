@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# secrets / local state
+client_secret.json
+oauth/client_secret.json
+oauth/token_cache/
+*.db
+*.sqlite3
+data/
+
+.env
+.DS_Store

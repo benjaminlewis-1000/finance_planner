@@ -1,0 +1,30 @@
+services:
+  # Note: on the Cloudflare Zero Trust dashboard, this app gets a hostname
+  # (financeforecast.exploretheworld.tech) with origin service
+  # http://owl_dashboard_backend:8000 -- its container name on the port it
+  # listens on. Gated by a Cloudflare Access policy against Authelia, same
+  # as other apps on this host (no Traefik labels needed -- there's no
+  # Traefik container running; traefik_proxy is just the shared bridge
+  # network cloudflared and every app join). See
+  # /home/benjamin/docker_via_tunnels/location_track/docker-compose.yml.
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/backend.Dockerfile
+    container_name: owl_dashboard_backend
+    ports:
+      - "8010:8000"  # local dev convenience only; not needed once behind the tunnel
+    volumes:
+      - ../oauth:/app/oauth
+      - ../data:/app/data
+    environment:
+      - DB_PATH=/app/data/owl_dashboard.db
+    networks:
+      - traefik_proxy
+    restart: unless-stopped
+
+networks:
+  default:
+    driver: bridge
+  traefik_proxy:
+    external: true
