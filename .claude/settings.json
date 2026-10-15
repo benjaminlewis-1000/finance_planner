@@ -1,0 +1,10 @@
+{
+  "autoMode": {
+    "environment": [
+      "$defaults",
+      "**Primary use of Claude Code**: software development — single-user FastAPI retirement-planning dashboard (owlplanner optimizer integration), Tiller Google Sheets balance ingestion, FERS pension modeling",
+      "**Trusted repo**: github.com:benjaminlewis-1000/finance_planner.git (working directory /home/benjamin/git_repos/finance_projections); private, single-user personal project",
+      "**Sensitive data locations & audiences**: oauth/client_secret.json and oauth/token_cache/token.json (git-ignored) hold Google OAuth client config and a cached read-only Sheets token; data/owl_dashboard.db (git-ignored SQLite) holds account mappings and will hold assumptions/pension/scenario data — all single-user personal financial data, share only with audiences cleared at the named+specifics bar"
+    ]
+  }
+}
