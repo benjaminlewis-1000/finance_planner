@@ -34,6 +34,81 @@ def init_db(conn: sqlite3.Connection) -> None:
             needs_review INTEGER NOT NULL DEFAULT 1,
             updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS salary_steps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner TEXT NOT NULL CHECK (owner IN ('self', 'spouse')),
+            effective_date TEXT NOT NULL,
+            annual_amount REAL NOT NULL,
+            note TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS expense_changes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            effective_date TEXT NOT NULL,
+            category TEXT NOT NULL,
+            annual_amount_delta REAL NOT NULL,
+            note TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS one_off_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_date TEXT NOT NULL,
+            description TEXT NOT NULL,
+            amount REAL NOT NULL,
+            category TEXT,
+            owner TEXT NOT NULL DEFAULT 'joint' CHECK (owner IN ('self', 'spouse', 'joint')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        -- Versioned FERS formula knobs, editable rather than hardcoded, since
+        -- the law can change. effective_date lets a past scenario snapshot
+        -- keep referring to the params that were true when it was made.
+        CREATE TABLE IF NOT EXISTS pension_params (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            effective_date TEXT NOT NULL,
+            multiplier_standard REAL NOT NULL DEFAULT 0.01,
+            multiplier_age62_20yos REAL NOT NULL DEFAULT 0.011,
+            mra_plus_10_reduction_per_year_under_62 REAL NOT NULL DEFAULT 0.05,
+            note TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS pension_profiles (
+            owner TEXT PRIMARY KEY CHECK (owner IN ('self', 'spouse')),
+            service_start_date TEXT NOT NULL,
+            high_3_salary REAL,
+            mra_age REAL NOT NULL DEFAULT 57,
+            survivor_benefit_fraction REAL NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS scenarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            separation_date_self TEXT,
+            separation_date_spouse TEXT,
+            assumptions_snapshot TEXT NOT NULL,
+            balances_snapshot TEXT NOT NULL,
+            case_params_snapshot TEXT,
+            toml_snapshot TEXT,
+            solve_result TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS solve_cache (
+            cache_key TEXT PRIMARY KEY,
+            result TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
         """
     )
     conn.commit()
