@@ -89,6 +89,23 @@ def init_db(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS household_members (
+            owner TEXT PRIMARY KEY CHECK (owner IN ('self', 'spouse')),
+            display_name TEXT NOT NULL,
+            date_of_birth TEXT NOT NULL,
+            life_expectancy INTEGER NOT NULL DEFAULT 92,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS social_security_profiles (
+            owner TEXT PRIMARY KEY CHECK (owner IN ('self', 'spouse')),
+            estimated_pia_monthly REAL NOT NULL,
+            full_retirement_age REAL NOT NULL DEFAULT 67,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS scenarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
