@@ -12,10 +12,23 @@ def get_db_path() -> Path:
 def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
     path = db_path or get_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    # check_same_thread=False: FastAPI's sync dependency functions run in a
+    # threadpool worker, not the thread that created the connection. Safe here
+    # -- this is a single-user app with no concurrent writers to race.
+    conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def get_db():
+    """FastAPI dependency -- a connection per request, closed afterward.
+    Tests override this via app.dependency_overrides to point at a tmp db."""
+    conn = get_connection()
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def init_db(conn: sqlite3.Connection) -> None:

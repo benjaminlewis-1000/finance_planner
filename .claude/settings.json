@@ -1,4 +1,10 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(git commit *)",
+      "Bash(git push*)"
+    ]
+  },
   "autoMode": {
     "environment": [
       "$defaults",

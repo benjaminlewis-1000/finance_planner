@@ -81,6 +81,17 @@ def sync_accounts(conn: sqlite3.Connection, pulled_accounts: list[dict]) -> dict
     }
 
 
+def update_account_mapping(conn: sqlite3.Connection, account_id: str, owl_bucket: str, owner: str) -> None:
+    """The settings-UI 'review' action: the user has looked at this account
+    and confirmed its bucket/owner, so needs_review clears."""
+    conn.execute(
+        "UPDATE account_mappings SET owl_bucket = ?, owner = ?, needs_review = 0, updated_at = ? "
+        "WHERE account_id = ?",
+        (owl_bucket, owner, _now(), account_id),
+    )
+    conn.commit()
+
+
 def parse_balance(raw: str) -> float:
     """Tiller's 'Last Balance' is a formatted currency string, e.g. '$1,234.56'."""
     cleaned = raw.replace("$", "").replace(",", "").strip()
