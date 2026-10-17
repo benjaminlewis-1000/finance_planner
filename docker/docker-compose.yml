@@ -1,12 +1,12 @@
 services:
-  # Note: on the Cloudflare Zero Trust dashboard, this app gets a hostname
-  # (financeforecast.exploretheworld.tech) with origin service
-  # http://owl_dashboard_backend:8000 -- its container name on the port it
-  # listens on. Gated by a Cloudflare Access policy against Authelia, same
-  # as other apps on this host (no Traefik labels needed -- there's no
-  # Traefik container running; traefik_proxy is just the shared bridge
-  # network cloudflared and every app join). See
-  # /home/benjamin/docker_via_tunnels/location_track/docker-compose.yml.
+  # Note: on the Cloudflare Zero Trust dashboard, financeforecast.exploretheworld.tech's
+  # Public Hostname service is http://owl_dashboard_streamlit:8501 (the UI,
+  # not this backend -- the backend is internal-only, reached by Streamlit's
+  # server-side code over this same traefik_proxy network, never by a
+  # browser). Streamlit also verifies the Authelia session itself
+  # (streamlit_app/auth.py) rather than relying solely on the Cloudflare
+  # Access policy being correctly configured -- that policy was found
+  # misconfigured once already (silently serving the app unauthenticated).
   backend:
     build:
       context: ..
@@ -24,9 +24,8 @@ services:
       - traefik_proxy
     restart: unless-stopped
 
-  # Prototype UI (step 7) -- not yet wired to Cloudflare/Authelia, that's
-  # step 9 once the React/Vite build (step 8) is the thing actually exposed.
-  # Reaches the backend by container name on the shared traefik_proxy network.
+  # Prototype UI (step 7) -- the actual public-facing app right now (see the
+  # note above). Reaches the backend by container name on traefik_proxy.
   streamlit:
     build:
       context: ..
@@ -36,6 +35,9 @@ services:
       - "8011:8501"  # local dev convenience only
     environment:
       - BACKEND_URL=http://owl_dashboard_backend:8000
+      - AUTHELIA_URL=https://auth.exploretheworld.tech
+      - PUBLIC_URL=https://financeforecast.exploretheworld.tech
+      - REQUIRE_AUTH=true
     networks:
       - traefik_proxy
     restart: unless-stopped

@@ -11,9 +11,15 @@ from datetime import date
 import requests
 import streamlit as st
 
+from auth import require_authelia_session
+
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8010")
 
 st.set_page_config(page_title="Owl Retirement Dashboard", layout="wide")
+
+# Verifies the session against Authelia directly, independent of whatever
+# Cloudflare Access is (or isn't) doing in front of this -- see auth.py.
+require_authelia_session()
 
 
 # --- tiny API client ----------------------------------------------------------
