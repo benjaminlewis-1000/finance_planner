@@ -253,29 +253,54 @@ def section_tiller():
         st.info("No accounts yet -- pull & sync first.")
         return
 
-    st.subheader("Review accounts")
     owners = [m["owner"] for m in get_household_members()] + ["joint"]
-    for acct in accounts:
-        with st.container(border=True):
-            cols = st.columns([3, 2, 2, 2, 2])
-            cols[0].write(f"**{acct['display_name']}** ({acct['last_seen_institution']} / {acct['last_seen_type']})")
-            bucket = cols[1].selectbox(
-                "Bucket", ["excluded", "taxable", "tax_deferred", "roth"],
-                index=["excluded", "taxable", "tax_deferred", "roth"].index(acct["owl_bucket"]),
-                key=f"bucket_{acct['account_id']}",
-            )
-            owner = cols[2].selectbox(
-                "Owner", owners,
-                index=owners.index(acct["owner"]) if acct["owner"] in owners else 0,
-                key=f"owner_{acct['account_id']}",
-            )
-            if acct["needs_review"]:
-                cols[3].warning("Needs review")
-            else:
-                cols[3].write("Reviewed")
-            if cols[4].button("Save", key=f"save_{acct['account_id']}"):
-                api("PATCH", f"/tiller/accounts/{acct['account_id']}", json={"owl_bucket": bucket, "owner": owner})
-                st.rerun()
+
+    needs_review = [a for a in accounts if a["needs_review"]]
+    reviewed = [a for a in accounts if not a["needs_review"]]
+    by_bucket = {
+        bucket: [a for a in reviewed if a["owl_bucket"] == bucket]
+        for bucket in ("taxable", "tax_deferred", "roth", "excluded")
+    }
+
+    st.subheader(f"Needs review ({len(needs_review)})")
+    if needs_review:
+        for acct in needs_review:
+            _account_row(acct, owners)
+    else:
+        st.caption("Nothing to review.")
+
+    for bucket, label in [("taxable", "Taxable"), ("tax_deferred", "Tax-deferred"), ("roth", "Roth")]:
+        group = by_bucket[bucket]
+        with st.expander(f"{label} ({len(group)})", expanded=bool(group)):
+            for acct in group:
+                _account_row(acct, owners)
+
+    with st.expander(f"Excluded ({len(by_bucket['excluded'])})", expanded=False):
+        for acct in by_bucket["excluded"]:
+            _account_row(acct, owners)
+
+
+def _account_row(acct: dict, owners: list[str]) -> None:
+    with st.container(border=True):
+        cols = st.columns([3, 2, 2, 2, 2])
+        cols[0].write(f"**{acct['display_name']}** ({acct['last_seen_institution']} / {acct['last_seen_type']})")
+        bucket = cols[1].selectbox(
+            "Bucket", ["excluded", "taxable", "tax_deferred", "roth"],
+            index=["excluded", "taxable", "tax_deferred", "roth"].index(acct["owl_bucket"]),
+            key=f"bucket_{acct['account_id']}",
+        )
+        owner = cols[2].selectbox(
+            "Owner", owners,
+            index=owners.index(acct["owner"]) if acct["owner"] in owners else 0,
+            key=f"owner_{acct['account_id']}",
+        )
+        if acct["needs_review"]:
+            cols[3].warning("Needs review")
+        else:
+            cols[3].write("Reviewed")
+        if cols[4].button("Save", key=f"save_{acct['account_id']}"):
+            api("PATCH", f"/tiller/accounts/{acct['account_id']}", json={"owl_bucket": bucket, "owner": owner})
+            st.rerun()
 
 
 def _scenario_inputs(owners: list[str], key_prefix: str) -> dict:
