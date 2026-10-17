@@ -259,7 +259,7 @@ def section_tiller():
     reviewed = [a for a in accounts if not a["needs_review"]]
     by_bucket = {
         bucket: [a for a in reviewed if a["owl_bucket"] == bucket]
-        for bucket in ("taxable", "tax_deferred", "roth", "excluded")
+        for bucket in ("taxable", "tax_deferred", "roth", "mixed", "excluded")
     }
 
     st.subheader(f"Needs review ({len(needs_review)})")
@@ -269,7 +269,9 @@ def section_tiller():
     else:
         st.caption("Nothing to review.")
 
-    for bucket, label in [("taxable", "Taxable"), ("tax_deferred", "Tax-deferred"), ("roth", "Roth")]:
+    for bucket, label in [
+        ("taxable", "Taxable"), ("tax_deferred", "Tax-deferred"), ("roth", "Roth"), ("mixed", "Mixed"),
+    ]:
         group = by_bucket[bucket]
         with st.expander(f"{label} ({len(group)})", expanded=bool(group)):
             for acct in group:
@@ -280,13 +282,15 @@ def section_tiller():
             _account_row(acct, owners)
 
 
+BUCKET_OPTIONS = ["excluded", "taxable", "tax_deferred", "roth", "mixed"]
+
+
 def _account_row(acct: dict, owners: list[str]) -> None:
     with st.container(border=True):
         cols = st.columns([3, 2, 2, 2, 2])
         cols[0].write(f"**{acct['display_name']}** ({acct['last_seen_institution']} / {acct['last_seen_type']})")
         bucket = cols[1].selectbox(
-            "Bucket", ["excluded", "taxable", "tax_deferred", "roth"],
-            index=["excluded", "taxable", "tax_deferred", "roth"].index(acct["owl_bucket"]),
+            "Bucket", BUCKET_OPTIONS, index=BUCKET_OPTIONS.index(acct["owl_bucket"]),
             key=f"bucket_{acct['account_id']}",
         )
         owner = cols[2].selectbox(
@@ -298,8 +302,20 @@ def _account_row(acct: dict, owners: list[str]) -> None:
             cols[3].warning("Needs review")
         else:
             cols[3].write("Reviewed")
+
+        roth_fraction = None
+        if bucket == "mixed":
+            default_pct = (acct.get("mixed_roth_fraction") or 0.0) * 100
+            roth_pct = st.slider(
+                "% Roth (rest is tax-deferred)", 0, 100, int(default_pct),
+                key=f"mixedpct_{acct['account_id']}",
+            )
+            roth_fraction = roth_pct / 100
+
         if cols[4].button("Save", key=f"save_{acct['account_id']}"):
-            api("PATCH", f"/tiller/accounts/{acct['account_id']}", json={"owl_bucket": bucket, "owner": owner})
+            api("PATCH", f"/tiller/accounts/{acct['account_id']}", json={
+                "owl_bucket": bucket, "owner": owner, "mixed_roth_fraction": roth_fraction,
+            })
             st.rerun()
 
 

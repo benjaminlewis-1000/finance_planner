@@ -81,13 +81,17 @@ def sync_accounts(conn: sqlite3.Connection, pulled_accounts: list[dict]) -> dict
     }
 
 
-def update_account_mapping(conn: sqlite3.Connection, account_id: str, owl_bucket: str, owner: str) -> None:
+def update_account_mapping(conn: sqlite3.Connection, account_id: str, owl_bucket: str, owner: str,
+                            mixed_roth_fraction: float | None = None) -> None:
     """The settings-UI 'review' action: the user has looked at this account
-    and confirmed its bucket/owner, so needs_review clears."""
+    and confirmed its bucket/owner, so needs_review clears. mixed_roth_fraction
+    is only meaningful (and required by the router) when owl_bucket='mixed';
+    stored as NULL otherwise so a stale fraction can't linger after someone
+    switches an account away from 'mixed'."""
     conn.execute(
-        "UPDATE account_mappings SET owl_bucket = ?, owner = ?, needs_review = 0, updated_at = ? "
-        "WHERE account_id = ?",
-        (owl_bucket, owner, _now(), account_id),
+        "UPDATE account_mappings SET owl_bucket = ?, owner = ?, mixed_roth_fraction = ?, "
+        "needs_review = 0, updated_at = ? WHERE account_id = ?",
+        (owl_bucket, owner, mixed_roth_fraction if owl_bucket == "mixed" else None, _now(), account_id),
     )
     conn.commit()
 

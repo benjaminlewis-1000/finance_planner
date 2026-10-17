@@ -42,8 +42,9 @@ def list_accounts(conn: Connection = Depends(get_db)):
 
 
 class AccountMappingUpdate(BaseModel):
-    owl_bucket: Literal["taxable", "tax_deferred", "roth", "excluded"]
+    owl_bucket: Literal["taxable", "tax_deferred", "roth", "mixed", "excluded"]
     owner: Literal["self", "spouse", "joint"]
+    mixed_roth_fraction: float | None = None  # required when owl_bucket == 'mixed'
 
 
 @router.patch("/accounts/{account_id}")
@@ -52,6 +53,12 @@ def update_mapping(account_id: str, body: AccountMappingUpdate, conn: Connection
     if existing is None:
         raise HTTPException(status_code=404, detail=f"Unknown account_id '{account_id}'")
 
-    update_account_mapping(conn, account_id, body.owl_bucket, body.owner)
+    if body.owl_bucket == "mixed":
+        if body.mixed_roth_fraction is None:
+            raise HTTPException(status_code=400, detail="mixed_roth_fraction is required when owl_bucket='mixed'")
+        if not 0 <= body.mixed_roth_fraction <= 1:
+            raise HTTPException(status_code=400, detail="mixed_roth_fraction must be between 0 and 1")
+
+    update_account_mapping(conn, account_id, body.owl_bucket, body.owner, body.mixed_roth_fraction)
     row = conn.execute("SELECT * FROM account_mappings WHERE account_id = ?", (account_id,)).fetchone()
     return dict(row)

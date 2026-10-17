@@ -73,14 +73,25 @@ def _bucket_balances(conn, pulled_accounts: list[dict], owners: list[str]) -> di
         bucket = mapping["owl_bucket"]
         owner = mapping["owner"]
 
-        if owner == "joint":
-            if "spouse" in owners:
-                totals["self"][bucket] += balance / 2
-                totals["spouse"][bucket] += balance / 2
-            else:
-                totals["self"][bucket] += balance
-        elif owner in totals:
-            totals[owner][bucket] += balance
+        # 'mixed' (e.g. a TSP with both a traditional and a Roth balance)
+        # splits into real buckets by mixed_roth_fraction before the
+        # owner-split below -- the rest of this loop doesn't need to know
+        # 'mixed' exists.
+        if bucket == "mixed":
+            roth_fraction = mapping["mixed_roth_fraction"] or 0.0
+            contributions = [("roth", balance * roth_fraction), ("tax_deferred", balance * (1 - roth_fraction))]
+        else:
+            contributions = [(bucket, balance)]
+
+        for sub_bucket, amount in contributions:
+            if owner == "joint":
+                if "spouse" in owners:
+                    totals["self"][sub_bucket] += amount / 2
+                    totals["spouse"][sub_bucket] += amount / 2
+                else:
+                    totals["self"][sub_bucket] += amount
+            elif owner in totals:
+                totals[owner][sub_bucket] += amount
 
     return {
         owner: {bucket: amount / 1000 for bucket, amount in buckets.items()}

@@ -34,13 +34,18 @@ def get_db():
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
+        -- 'mixed' is for accounts split across tax treatments (e.g. a TSP
+        -- with both a traditional/tax_deferred balance and a Roth balance)
+        -- -- mixed_roth_fraction (0-1) holds the Roth share; the rest is
+        -- tax_deferred. Only meaningful when owl_bucket = 'mixed'.
         CREATE TABLE IF NOT EXISTS account_mappings (
             account_id TEXT PRIMARY KEY,
             display_name TEXT NOT NULL,
             owl_bucket TEXT NOT NULL DEFAULT 'excluded'
-                CHECK (owl_bucket IN ('taxable', 'tax_deferred', 'roth', 'excluded')),
+                CHECK (owl_bucket IN ('taxable', 'tax_deferred', 'roth', 'mixed', 'excluded')),
             owner TEXT NOT NULL DEFAULT 'self'
                 CHECK (owner IN ('self', 'spouse', 'joint')),
+            mixed_roth_fraction REAL,
             last_seen_type TEXT,
             last_seen_institution TEXT,
             last_seen_at TEXT NOT NULL,
@@ -139,6 +144,49 @@ def init_db(conn: sqlite3.Connection) -> None:
             result TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+        """
+    )
+    conn.commit()
+    _migrate_account_mappings_for_mixed_bucket(conn)
+
+
+def _migrate_account_mappings_for_mixed_bucket(conn: sqlite3.Connection) -> None:
+    """A pre-existing account_mappings table (from before 'mixed' existed)
+    has a CHECK constraint that doesn't allow it and no mixed_roth_fraction
+    column -- SQLite can't ALTER a CHECK constraint in place, so this rebuilds
+    the table under the new schema, copying every existing row forward.
+    Idempotent: skipped once mixed_roth_fraction already exists."""
+    columns = [row["name"] for row in conn.execute("PRAGMA table_info(account_mappings)").fetchall()]
+    if "mixed_roth_fraction" in columns:
+        return
+
+    conn.executescript(
+        """
+        ALTER TABLE account_mappings RENAME TO account_mappings_pre_mixed;
+
+        CREATE TABLE account_mappings (
+            account_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            owl_bucket TEXT NOT NULL DEFAULT 'excluded'
+                CHECK (owl_bucket IN ('taxable', 'tax_deferred', 'roth', 'mixed', 'excluded')),
+            owner TEXT NOT NULL DEFAULT 'self'
+                CHECK (owner IN ('self', 'spouse', 'joint')),
+            mixed_roth_fraction REAL,
+            last_seen_type TEXT,
+            last_seen_institution TEXT,
+            last_seen_at TEXT NOT NULL,
+            needs_review INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT NOT NULL
+        );
+
+        INSERT INTO account_mappings
+            (account_id, display_name, owl_bucket, owner, last_seen_type,
+             last_seen_institution, last_seen_at, needs_review, updated_at)
+        SELECT account_id, display_name, owl_bucket, owner, last_seen_type,
+               last_seen_institution, last_seen_at, needs_review, updated_at
+        FROM account_mappings_pre_mixed;
+
+        DROP TABLE account_mappings_pre_mixed;
         """
     )
     conn.commit()
