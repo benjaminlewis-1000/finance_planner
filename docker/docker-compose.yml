@@ -38,6 +38,7 @@ services:
       - AUTHELIA_URL=https://auth.exploretheworld.tech
       - PUBLIC_URL=https://financeforecast.exploretheworld.tech
       - REQUIRE_AUTH=true
+      - TILLER_SPREADSHEET_ID=1wSYqEX5RKQC-uuQQ-aVi88wstojXXG56o-r1EBvzOsc
     networks:
       - traefik_proxy
     restart: unless-stopped

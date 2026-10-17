@@ -14,6 +14,7 @@ import streamlit as st
 from auth import logout_url, require_authelia_session
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8010")
+DEFAULT_SPREADSHEET_ID = os.environ.get("TILLER_SPREADSHEET_ID", "")
 
 st.set_page_config(page_title="Owl Retirement Dashboard", layout="wide")
 
@@ -24,9 +25,14 @@ require_authelia_session()
 
 # --- tiny API client ----------------------------------------------------------
 
-def api(method: str, path: str, **kwargs):
+def api(method: str, path: str, allow_statuses: tuple[int, ...] = (), **kwargs):
+    """allow_statuses lets a caller treat a specific non-2xx status as a
+    normal, silent "not found" rather than an error banner -- e.g. a
+    profile that simply hasn't been created yet, not a real failure."""
     resp = requests.request(method, f"{BACKEND_URL}{path}", timeout=30, **kwargs)
     if not resp.ok:
+        if resp.status_code in allow_statuses:
+            return None
         try:
             detail = resp.json().get("detail", resp.text)
         except ValueError:
@@ -180,7 +186,7 @@ def section_pension_ss():
 
     for owner in owners:
         st.subheader(f"Pension profile -- {owner}")
-        existing = api("GET", f"/assumptions/pension-profile/{owner}")
+        existing = api("GET", f"/assumptions/pension-profile/{owner}", allow_statuses=(404,))
         with st.form(f"pension_profile_{owner}"):
             service_start_date = st.date_input(
                 "Service start date",
@@ -204,7 +210,7 @@ def section_pension_ss():
                 st.rerun()
 
         st.subheader(f"Social Security profile -- {owner}")
-        existing_ss = api("GET", f"/assumptions/social-security-profile/{owner}")
+        existing_ss = api("GET", f"/assumptions/social-security-profile/{owner}", allow_statuses=(404,))
         with st.form(f"ss_profile_{owner}"):
             pia = st.number_input(
                 "Estimated PIA at full retirement age ($/month)",
@@ -231,7 +237,7 @@ def section_tiller():
         else:
             st.error(f"Not authenticated: {status['message']}")
 
-    spreadsheet_id = st.text_input("Tiller spreadsheet ID", value=st.session_state.get("spreadsheet_id", ""))
+    spreadsheet_id = st.text_input("Tiller spreadsheet ID", value=st.session_state.get("spreadsheet_id", DEFAULT_SPREADSHEET_ID))
     st.session_state["spreadsheet_id"] = spreadsheet_id
 
     if st.button("Pull & sync accounts") and spreadsheet_id:
@@ -308,7 +314,7 @@ def section_solve():
         return
 
     spreadsheet_id = st.text_input(
-        "Tiller spreadsheet ID", value=st.session_state.get("spreadsheet_id", ""), key="solve_sheet_id"
+        "Tiller spreadsheet ID", value=st.session_state.get("spreadsheet_id", DEFAULT_SPREADSHEET_ID), key="solve_sheet_id"
     )
     st.session_state["spreadsheet_id"] = spreadsheet_id
 
@@ -330,7 +336,7 @@ def section_scenarios():
     st.subheader("Save a new scenario")
     if owners:
         spreadsheet_id = st.text_input(
-            "Tiller spreadsheet ID", value=st.session_state.get("spreadsheet_id", ""), key="scenario_sheet_id"
+            "Tiller spreadsheet ID", value=st.session_state.get("spreadsheet_id", DEFAULT_SPREADSHEET_ID), key="scenario_sheet_id"
         )
         name = st.text_input("Scenario name")
         description = st.text_input("Description")
