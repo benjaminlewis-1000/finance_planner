@@ -19,9 +19,28 @@ services:
       - ../data:/app/data
     environment:
       - DB_PATH=/app/data/owl_dashboard.db
+      - OAUTH_DIR=/app/oauth
     networks:
       - traefik_proxy
     restart: unless-stopped
+
+  # Prototype UI (step 7) -- not yet wired to Cloudflare/Authelia, that's
+  # step 9 once the React/Vite build (step 8) is the thing actually exposed.
+  # Reaches the backend by container name on the shared traefik_proxy network.
+  streamlit:
+    build:
+      context: ..
+      dockerfile: docker/streamlit.Dockerfile
+    container_name: owl_dashboard_streamlit
+    ports:
+      - "8011:8501"  # local dev convenience only
+    environment:
+      - BACKEND_URL=http://owl_dashboard_backend:8000
+    networks:
+      - traefik_proxy
+    restart: unless-stopped
+    depends_on:
+      - backend
 
 networks:
   default:

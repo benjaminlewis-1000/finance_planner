@@ -10,6 +10,7 @@ OAuth design (per the build plan):
   token from oauth/token_cache/token.json.
 """
 
+import os
 from pathlib import Path
 
 from google.auth.exceptions import RefreshError
@@ -19,7 +20,12 @@ from googleapiclient.discovery import build
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
-OAUTH_DIR = Path(__file__).resolve().parents[3] / "oauth"
+# parents[3] assumes the local dev layout (repo_root/backend/app/tiller/...),
+# which doesn't hold inside the Docker image (WORKDIR /app, code copied to
+# ./app -- one directory level shallower). OAUTH_DIR env var lets
+# docker-compose override it to the actual mount point (/app/oauth), same
+# pattern as db.py's DB_PATH.
+OAUTH_DIR = Path(os.environ.get("OAUTH_DIR", Path(__file__).resolve().parents[3] / "oauth"))
 CLIENT_SECRET_FILE = OAUTH_DIR / "client_secret.json"
 TOKEN_FILE = OAUTH_DIR / "token_cache" / "token.json"
 
