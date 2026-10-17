@@ -53,6 +53,14 @@ def check_authelia_cookie(cookie: str | None) -> tuple[bool, str]:
     return True, ""
 
 
+def logout_url() -> str:
+    """Authelia's own /logout endpoint, not ours -- there's no local session
+    for this app to tear down (it never issues its own cookie), and visiting
+    this as a full page navigation is what makes Authelia's response actually
+    clear the authelia_session cookie in the browser."""
+    return f"{AUTHELIA_URL}/logout?rd={PUBLIC_URL}"
+
+
 def require_authelia_session() -> None:
     """Call once at the top of the app, before rendering anything else.
     Streamlit re-runs the whole script on every interaction, so this

@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 import requests
 
-from auth import check_authelia_cookie
+from auth import check_authelia_cookie, logout_url
 
 
 def test_no_cookie_denies():
@@ -56,3 +56,9 @@ def test_verify_call_sends_the_cookie_under_the_expected_name():
         mock_get.return_value.status_code = 200
         check_authelia_cookie("the-actual-token")
     assert mock_get.call_args.kwargs["cookies"] == {"authelia_session": "the-actual-token"}
+
+
+def test_logout_url_points_at_authelias_own_logout_with_a_redirect_back():
+    url = logout_url()
+    assert url.startswith("https://auth.exploretheworld.tech/logout?rd=")
+    assert "financeforecast.exploretheworld.tech" in url

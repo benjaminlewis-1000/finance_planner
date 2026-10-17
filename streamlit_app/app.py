@@ -11,7 +11,7 @@ from datetime import date
 import requests
 import streamlit as st
 
-from auth import require_authelia_session
+from auth import logout_url, require_authelia_session
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8010")
 
@@ -373,4 +373,6 @@ SECTIONS = {
 
 st.sidebar.title("Owl Retirement Dashboard")
 choice = st.sidebar.radio("Section", list(SECTIONS.keys()))
+st.sidebar.divider()
+st.sidebar.link_button("Log out", logout_url())
 SECTIONS[choice]()
