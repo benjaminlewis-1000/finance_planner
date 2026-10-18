@@ -22,6 +22,7 @@ import pandas as pd
 
 from app.assumptions import crud, household
 from app.assumptions.pension import compute_fers_pension, get_current_pension_params, get_pension_profile
+from app.assumptions.salary import compute_high_3, get_salary_profile, project_salary
 from app.assumptions.social_security import compute_social_security_benefit, get_social_security_profile
 from app.tiller.mapping import parse_balance
 
@@ -103,19 +104,25 @@ def _hfp_dataframe(conn, owner: str, owners: list[str], years: list[int]) -> pd.
     """A 'joint' one-off event is split 50/50 across both people's HFP frames
     when there's a spouse, same convention as joint account balances; with no
     spouse in the household it falls entirely on 'self'."""
-    salary_rows = crud.list_salary_steps(conn, owner=owner)
     has_spouse = "spouse" in owners
     event_rows = [
         row for row in crud.list_one_off_events(conn)
         if row["owner"] == owner or row["owner"] == "joint"
     ]
 
-    wages_by_year = {}
-    for step in salary_rows:
-        step_year = date.fromisoformat(step["effective_date"]).year
-        for year in years:
-            if year >= step_year:
-                wages_by_year[year] = step["annual_amount"]
+    # A salary_profile (current salary + annual % growth) is the primary way
+    # to project future wages; salary_steps (manual step entries) are only a
+    # fallback for an owner with no profile set.
+    salary_profile = get_salary_profile(conn, owner)
+    if salary_profile is not None:
+        wages_by_year = {year: project_salary(salary_profile, year) for year in years}
+    else:
+        wages_by_year = {}
+        for step in crud.list_salary_steps(conn, owner=owner):
+            step_year = date.fromisoformat(step["effective_date"]).year
+            for year in years:
+                if year >= step_year:
+                    wages_by_year[year] = step["annual_amount"]
 
     events_by_year: dict[int, float] = {}
     for event in event_rows:
@@ -140,12 +147,19 @@ def _pension_amount_and_age(conn, owner: str, scenario: ScenarioParams) -> tuple
     if profile is None or separation_date is None or separation_age is None:
         return 0.0, 65.0, 0.0  # no pension for this person in this scenario
 
+    high_3_salary = profile["high_3_salary"]
+    if high_3_salary is None:
+        salary_profile = get_salary_profile(conn, owner)
+        if salary_profile is None:
+            return 0.0, 65.0, 0.0  # no high-3 override and no salary profile to project it from
+        high_3_salary = compute_high_3(salary_profile, separation_date.year)
+
     params = get_current_pension_params(conn)
     result = compute_fers_pension(
         service_start_date=date.fromisoformat(profile["service_start_date"]),
         separation_date=separation_date,
         separation_age=separation_age,
-        high_3_salary=profile["high_3_salary"],
+        high_3_salary=high_3_salary,
         mra_age=profile["mra_age"],
         params=params,
     )

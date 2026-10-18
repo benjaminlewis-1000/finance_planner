@@ -111,6 +111,14 @@ def get_pension_profile(conn: sqlite3.Connection, owner: str) -> sqlite3.Row | N
     return conn.execute("SELECT * FROM pension_profiles WHERE owner = ?", (owner,)).fetchone()
 
 
+def delete_pension_profile(conn: sqlite3.Connection, owner: str) -> None:
+    """The explicit 'this person has no pension' path -- removing the profile
+    row, not just leaving fields blank, so the pension-preview UI can show
+    'No pension' instead of a zeroed-out form."""
+    conn.execute("DELETE FROM pension_profiles WHERE owner = ?", (owner,))
+    conn.commit()
+
+
 # --- the calculation itself --------------------------------------------------
 
 def compute_fers_pension(service_start_date: date, separation_date: date, separation_age: float,

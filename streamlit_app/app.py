@@ -46,6 +46,20 @@ def get_household_members() -> list[dict]:
     return api("GET", "/assumptions/household-members") or []
 
 
+def _age_on(dob: date, as_of: date) -> float:
+    """Mirrors household.age_on's day-count convention -- kept as plain
+    arithmetic here (not a backend call) since it's a one-line formula, not
+    FERS-specific logic that could drift from the backend."""
+    return (as_of - dob).days / 365.25
+
+
+def _default_separation_date(dob: date, retirement_age: int = 62) -> date:
+    try:
+        return dob.replace(year=dob.year + retirement_age)
+    except ValueError:
+        return dob.replace(year=dob.year + retirement_age, day=28)
+
+
 # --- sections -------------------------------------------------------------------
 
 def section_household():
@@ -83,7 +97,36 @@ def section_assumptions():
         st.info("Add at least yourself under Household before entering assumptions.")
         return
 
-    st.subheader("Salary steps")
+    st.subheader("Current salary & projected growth")
+    st.caption(
+        "Primary way to project future wages: current salary (this year's rate) "
+        "compounded by an annual % increase every Jan 1 after that. Feeds both "
+        "the solve's wage schedule and the pension page's high-3 estimate. If "
+        "set for an owner, it takes over wage projection entirely -- manual "
+        "salary steps below only apply to an owner with no profile set."
+    )
+    for owner in owners:
+        existing_salary = api("GET", f"/assumptions/salary-profile/{owner}", allow_statuses=(404,))
+        with st.form(f"salary_profile_{owner}"):
+            st.markdown(f"**{owner}**")
+            cols = st.columns(2)
+            current_salary = cols[0].number_input(
+                "Current salary ($/year)",
+                value=float(existing_salary["current_salary"]) if existing_salary else 0.0,
+                min_value=0.0, step=1000.0, key=f"cur_salary_{owner}",
+            )
+            increase_pct = cols[1].number_input(
+                "Estimated annual increase (%)",
+                value=float(existing_salary["annual_increase_pct"]) * 100 if existing_salary else 2.0,
+                step=0.1, key=f"salary_pct_{owner}",
+            )
+            if st.form_submit_button(f"Save salary profile ({owner})"):
+                api("PUT", f"/assumptions/salary-profile/{owner}", json={
+                    "current_salary": current_salary, "annual_increase_pct": increase_pct / 100,
+                })
+                st.rerun()
+
+    st.subheader("Salary steps (manual overrides)")
     steps = api("GET", "/assumptions/salary-steps") or []
     if steps:
         st.table(steps)
@@ -187,27 +230,51 @@ def section_pension_ss():
     for owner in owners:
         st.subheader(f"Pension profile -- {owner}")
         existing = api("GET", f"/assumptions/pension-profile/{owner}", allow_statuses=(404,))
-        with st.form(f"pension_profile_{owner}"):
-            service_start_date = st.date_input(
-                "Service start date",
-                value=date.fromisoformat(existing["service_start_date"]) if existing else date(2016, 1, 1),
-                key=f"psd_{owner}",
-            )
-            high_3_salary = st.number_input(
-                "High-3 salary ($)", value=float(existing["high_3_salary"]) if existing and existing["high_3_salary"] else 0.0,
-                key=f"h3_{owner}",
-            )
-            mra_age = st.number_input("MRA age", value=float(existing["mra_age"]) if existing else 57.0, key=f"mra_{owner}")
-            survivor_fraction = st.number_input(
-                "Survivor benefit fraction", value=float(existing["survivor_benefit_fraction"]) if existing else 0.0,
-                min_value=0.0, max_value=1.0, key=f"surv_{owner}",
-            )
-            if st.form_submit_button(f"Save pension profile ({owner})"):
-                api("PUT", f"/assumptions/pension-profile/{owner}", json={
-                    "service_start_date": service_start_date.isoformat(), "high_3_salary": high_3_salary,
-                    "mra_age": mra_age, "survivor_benefit_fraction": survivor_fraction,
-                })
+        has_pension = st.checkbox(
+            f"{owner} has a FERS pension", value=existing is not None, key=f"has_pension_{owner}",
+        )
+        if not has_pension:
+            if existing is not None:
+                api("DELETE", f"/assumptions/pension-profile/{owner}")
                 st.rerun()
+            st.caption("No pension for this person.")
+        else:
+            with st.form(f"pension_profile_{owner}"):
+                service_start_date = st.date_input(
+                    "Service start date",
+                    value=date.fromisoformat(existing["service_start_date"]) if existing else date(2016, 1, 1),
+                    key=f"psd_{owner}",
+                )
+                high_3_salary = st.number_input(
+                    "High-3 salary override ($, leave 0 to use the projected salary growth above)",
+                    value=float(existing["high_3_salary"]) if existing and existing["high_3_salary"] else 0.0,
+                    key=f"h3_{owner}",
+                )
+                mra_age = st.number_input("MRA age", value=float(existing["mra_age"]) if existing else 57.0, key=f"mra_{owner}")
+                survivor_fraction = st.number_input(
+                    "Survivor benefit fraction", value=float(existing["survivor_benefit_fraction"]) if existing else 0.0,
+                    min_value=0.0, max_value=1.0, key=f"surv_{owner}",
+                )
+                if st.form_submit_button(f"Save pension profile ({owner})"):
+                    api("PUT", f"/assumptions/pension-profile/{owner}", json={
+                        "service_start_date": service_start_date.isoformat(),
+                        "high_3_salary": high_3_salary or None,
+                        "mra_age": mra_age, "survivor_benefit_fraction": survivor_fraction,
+                    })
+                    st.rerun()
+
+            preview = api("GET", f"/assumptions/pension-preview/{owner}")
+            if preview and preview.get("has_pension"):
+                st.markdown("**Preliminary estimate** (assuming separation at DOB + 62, unless set otherwise under Solve/Scenarios)")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Years of service", f"{preview['years_of_service']:.1f}")
+                c2.metric("High-3 salary used", f"${preview['high_3_salary_used']:,.0f}")
+                c3.metric("Multiplier used", f"{preview['multiplier_used'] * 100:.2f}%")
+                c4.metric("Est. annual pension", f"${preview['annual_pension']:,.0f}")
+                st.caption(
+                    f"Separation age {preview['separation_age']:.1f} on {preview['separation_date']} "
+                    f"-- {preview['eligibility_note']}"
+                )
 
         st.subheader(f"Social Security profile -- {owner}")
         existing_ss = api("GET", f"/assumptions/social-security-profile/{owner}", allow_statuses=(404,))
@@ -288,7 +355,9 @@ BUCKET_OPTIONS = ["excluded", "taxable", "tax_deferred", "roth", "mixed"]
 def _account_row(acct: dict, owners: list[str]) -> None:
     with st.container(border=True):
         cols = st.columns([3, 2, 2, 2, 2])
-        cols[0].write(f"**{acct['display_name']}** ({acct['last_seen_institution']} / {acct['last_seen_type']})")
+        balance = acct.get("last_seen_balance")
+        balance_str = f" -- ${balance:,.0f}" if balance is not None else ""
+        cols[0].write(f"**{acct['display_name']}**{balance_str} ({acct['last_seen_institution']} / {acct['last_seen_type']})")
         bucket = cols[1].selectbox(
             "Bucket", BUCKET_OPTIONS, index=BUCKET_OPTIONS.index(acct["owl_bucket"]),
             key=f"bucket_{acct['account_id']}",
@@ -320,22 +389,28 @@ def _account_row(acct: dict, owners: list[str]) -> None:
 
 
 def _scenario_inputs(owners: list[str], key_prefix: str) -> dict:
-    separation_date, separation_age, ss_claiming_age = {}, {}, {}
+    """Separation age is computed from date_of_birth + the chosen separation
+    date, not typed -- the backend derives the same value from the same
+    inputs when building the plan, so the two can't disagree."""
+    members = {m["owner"]: m for m in get_household_members()}
+    separation_date, ss_claiming_age = {}, {}
     for owner in owners:
         st.markdown(f"**{owner}**")
+        dob = date.fromisoformat(members[owner]["date_of_birth"])
         cols = st.columns(3)
-        sep_date = cols[0].date_input("Separation date", key=f"{key_prefix}_sepdate_{owner}")
-        sep_age = cols[1].number_input("Separation age", value=60.0, key=f"{key_prefix}_sepage_{owner}")
+        sep_date = cols[0].date_input(
+            "Separation date", value=_default_separation_date(dob), key=f"{key_prefix}_sepdate_{owner}",
+        )
+        cols[1].metric("Separation age", f"{_age_on(dob, sep_date):.1f}")
         ss_age = cols[2].number_input("SS claiming age", value=67.0, key=f"{key_prefix}_ssage_{owner}")
         separation_date[owner] = sep_date.isoformat()
-        separation_age[owner] = sep_age
         ss_claiming_age[owner] = ss_age
 
     objective = st.selectbox("Objective", ["maxSpending", "maxBequest"], key=f"{key_prefix}_objective")
     bequest = st.number_input("Bequest (today's $)", value=0.0, step=10000.0, key=f"{key_prefix}_bequest")
 
     return {
-        "separation_date": separation_date, "separation_age": separation_age,
+        "separation_date": separation_date,
         "ss_claiming_age": ss_claiming_age, "objective": objective, "bequest": bequest,
     }
 

@@ -81,6 +81,69 @@ def test_pension_profile_404_when_unset(client):
     assert resp.status_code == 404
 
 
+def test_pension_profile_delete_turns_pension_off(client):
+    api, conn = client
+    api.put("/assumptions/pension-profile/spouse", json={
+        "service_start_date": "2016-12-11", "high_3_salary": 100000,
+    })
+    assert api.get("/assumptions/pension-profile/spouse").status_code == 200
+
+    resp = api.delete("/assumptions/pension-profile/spouse")
+    assert resp.status_code == 200
+    assert api.get("/assumptions/pension-profile/spouse").status_code == 404
+
+
+def test_salary_profile_round_trip(client):
+    api, conn = client
+    resp = api.put("/assumptions/salary-profile/self", json={
+        "current_salary": 140000, "annual_increase_pct": 0.03,
+    })
+    assert resp.status_code == 200
+    assert resp.json()["current_salary"] == 140000
+
+    resp = api.get("/assumptions/salary-profile/self")
+    assert resp.json()["annual_increase_pct"] == 0.03
+
+
+def test_salary_profile_404_when_unset(client):
+    api, conn = client
+    resp = api.get("/assumptions/salary-profile/spouse")
+    assert resp.status_code == 404
+
+
+def test_pension_preview_uses_salary_profile_for_high_3(client):
+    api, conn = client
+    seed_household(conn)
+    api.put("/assumptions/pension-profile/self", json={
+        "service_start_date": "2016-12-11", "mra_age": 57,  # no high_3_salary override
+    })
+    api.put("/assumptions/salary-profile/self", json={
+        "current_salary": 100000, "annual_increase_pct": 0.03,
+    })
+
+    resp = api.get("/assumptions/pension-preview/self", params={"separation_date": "2050-06-01"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["has_pension"] is True
+    assert body["separation_age"] == pytest.approx(62.0, abs=0.01)
+    assert body["high_3_salary_used"] > 100000  # projected forward from today, not today's raw rate
+
+
+def test_pension_preview_no_pension(client):
+    api, conn = client
+    seed_household(conn)
+    resp = api.get("/assumptions/pension-preview/self")
+    assert resp.json() == {"has_pension": False}
+
+
+def test_pension_preview_400_without_high_3_or_salary_profile(client):
+    api, conn = client
+    seed_household(conn)
+    api.put("/assumptions/pension-profile/self", json={"service_start_date": "2016-12-11"})
+    resp = api.get("/assumptions/pension-preview/self")
+    assert resp.status_code == 400
+
+
 def test_household_member_round_trip(client):
     api, conn = client
     resp = api.put("/assumptions/household-member/self", json={

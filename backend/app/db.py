@@ -97,6 +97,18 @@ def init_db(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL
         );
 
+        -- Drives wage projection in case_builder.py and the pension page's
+        -- high-3 preview: current_salary is treated as this calendar year's
+        -- rate, with annual_increase_pct compounding every Jan 1 after that
+        -- (matches federal pay raises, which land Jan 1).
+        CREATE TABLE IF NOT EXISTS salary_profiles (
+            owner TEXT PRIMARY KEY CHECK (owner IN ('self', 'spouse')),
+            current_salary REAL NOT NULL,
+            annual_increase_pct REAL NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS pension_profiles (
             owner TEXT PRIMARY KEY CHECK (owner IN ('self', 'spouse')),
             service_start_date TEXT NOT NULL,
@@ -148,6 +160,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     conn.commit()
     _migrate_account_mappings_for_mixed_bucket(conn)
+    _migrate_account_mappings_add_balance_column(conn)
 
 
 def _migrate_account_mappings_for_mixed_bucket(conn: sqlite3.Connection) -> None:
@@ -189,4 +202,16 @@ def _migrate_account_mappings_for_mixed_bucket(conn: sqlite3.Connection) -> None
         DROP TABLE account_mappings_pre_mixed;
         """
     )
+    conn.commit()
+
+
+def _migrate_account_mappings_add_balance_column(conn: sqlite3.Connection) -> None:
+    """last_seen_balance holds the most recent Tiller-pulled balance so the
+    account-review UI can show dollar amounts, not just metadata. A plain
+    ADD COLUMN suffices here (no CHECK constraint involved, unlike the
+    mixed-bucket migration above)."""
+    columns = [row["name"] for row in conn.execute("PRAGMA table_info(account_mappings)").fetchall()]
+    if "last_seen_balance" in columns:
+        return
+    conn.execute("ALTER TABLE account_mappings ADD COLUMN last_seen_balance REAL")
     conn.commit()

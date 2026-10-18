@@ -25,7 +25,7 @@ def create_scenario(body: SaveScenarioRequest, conn: Connection = Depends(get_db
     except TillerSchemaError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    scenario = body.to_scenario_params()
+    scenario = body.to_scenario_params(conn)
     fingerprint = assumptions_fingerprint(conn)
     result = solve_scenario(conn, pulled_accounts, scenario, fingerprint, force_recalculate=body.force_recalculate)
 

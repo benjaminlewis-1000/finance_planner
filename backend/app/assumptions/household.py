@@ -3,7 +3,7 @@ birth, life expectancy. Spouse is optional -- a household with only a 'self'
 row builds a single-person Plan."""
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 
 def _now() -> str:
@@ -39,3 +39,21 @@ def list_household_members(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT * FROM household_members ORDER BY CASE owner WHEN 'self' THEN 0 ELSE 1 END"
     ).fetchall()
+
+
+def age_on(date_of_birth: str, as_of_date: date) -> float:
+    """Same day-count convention pension.py uses for years_of_service, so an
+    age computed here lines up with the FERS eligibility math."""
+    dob = date.fromisoformat(date_of_birth)
+    return (as_of_date - dob).days / 365.25
+
+
+def default_separation_date(date_of_birth: str, retirement_age: int = 62) -> date:
+    """DOB + retirement_age years, used to default a scenario's separation
+    date before the user picks their own."""
+    dob = date.fromisoformat(date_of_birth)
+    try:
+        return dob.replace(year=dob.year + retirement_age)
+    except ValueError:
+        # Feb 29 birthday, target year isn't a leap year.
+        return dob.replace(year=dob.year + retirement_age, day=28)

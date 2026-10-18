@@ -31,6 +31,7 @@ def sync_accounts(conn: sqlite3.Connection, pulled_accounts: list[dict]) -> dict
         display_name = row.get("Account", "")
         seen_type = row.get("Type", "")
         seen_institution = row.get("Institution", "")
+        balance = parse_balance(row.get("Last Balance", ""))
 
         existing = conn.execute(
             "SELECT * FROM account_mappings WHERE account_id = ?", (account_id,)
@@ -41,11 +42,11 @@ def sync_accounts(conn: sqlite3.Connection, pulled_accounts: list[dict]) -> dict
                 """
                 INSERT INTO account_mappings
                     (account_id, display_name, owl_bucket, owner,
-                     last_seen_type, last_seen_institution, last_seen_at,
+                     last_seen_type, last_seen_institution, last_seen_balance, last_seen_at,
                      needs_review, updated_at)
-                VALUES (?, ?, 'excluded', 'self', ?, ?, ?, 1, ?)
+                VALUES (?, ?, 'excluded', 'self', ?, ?, ?, ?, 1, ?)
                 """,
-                (account_id, display_name, seen_type, seen_institution, now, now),
+                (account_id, display_name, seen_type, seen_institution, balance, now, now),
             )
             new_accounts.append(account_id)
             continue
@@ -60,16 +61,16 @@ def sync_accounts(conn: sqlite3.Connection, pulled_accounts: list[dict]) -> dict
                 """
                 UPDATE account_mappings
                 SET display_name = ?, last_seen_type = ?, last_seen_institution = ?,
-                    last_seen_at = ?, needs_review = 1, updated_at = ?
+                    last_seen_balance = ?, last_seen_at = ?, needs_review = 1, updated_at = ?
                 WHERE account_id = ?
                 """,
-                (display_name, seen_type, seen_institution, now, now, account_id),
+                (display_name, seen_type, seen_institution, balance, now, now, account_id),
             )
             changed_accounts.append(account_id)
         else:
             conn.execute(
-                "UPDATE account_mappings SET last_seen_at = ? WHERE account_id = ?",
-                (now, account_id),
+                "UPDATE account_mappings SET last_seen_balance = ?, last_seen_at = ? WHERE account_id = ?",
+                (balance, now, account_id),
             )
             unchanged_count += 1
 

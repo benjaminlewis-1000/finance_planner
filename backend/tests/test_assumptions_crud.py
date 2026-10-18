@@ -1,5 +1,10 @@
-from app.assumptions import crud
+from datetime import date
+
+import pytest
+
+from app.assumptions import crud, household
 from app.assumptions.pension import (
+    delete_pension_profile,
     get_current_pension_params,
     get_pension_profile,
     set_pension_params,
@@ -72,3 +77,24 @@ def test_pension_profile_upsert(tmp_path):
                          high_3_salary=150_000, mra_age=57, survivor_benefit_fraction=0.5)
     profile = get_pension_profile(conn, "self")
     assert profile["high_3_salary"] == 150_000
+
+
+def test_pension_profile_delete_is_the_no_pension_path(tmp_path):
+    conn = make_conn(tmp_path)
+    set_pension_profile(conn, owner="spouse", service_start_date="2016-12-11", high_3_salary=100_000)
+    assert get_pension_profile(conn, "spouse") is not None
+
+    delete_pension_profile(conn, "spouse")
+    assert get_pension_profile(conn, "spouse") is None
+
+
+def test_age_on_matches_pension_py_day_count_convention(tmp_path):
+    # Same (as_of - dob).days / 365.25 convention compute_fers_pension uses
+    # for years_of_service, so a computed separation_age lines up with it.
+    assert household.age_on("1988-06-01", date(2050, 6, 1)) == pytest.approx(62.0, abs=0.01)
+
+
+def test_default_separation_date_is_dob_plus_62(tmp_path):
+    assert household.default_separation_date("1988-06-01") == date(2050, 6, 1)
+    # Feb 29 birthday with a non-leap target year falls back to Feb 28.
+    assert household.default_separation_date("2000-02-29", retirement_age=23) == date(2023, 2, 28)

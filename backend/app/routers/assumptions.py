@@ -1,3 +1,4 @@
+from datetime import date
 from sqlite3 import Connection
 from typing import Literal
 
@@ -6,11 +7,14 @@ from pydantic import BaseModel
 
 from app.assumptions import crud, household
 from app.assumptions.pension import (
+    compute_fers_pension,
+    delete_pension_profile,
     get_current_pension_params,
     get_pension_profile,
     set_pension_params,
     set_pension_profile,
 )
+from app.assumptions.salary import compute_high_3, get_salary_profile, set_salary_profile
 from app.assumptions.social_security import get_social_security_profile, set_social_security_profile
 from app.db import get_db
 
@@ -99,6 +103,27 @@ def delete_one_off_event(event_id: int, conn: Connection = Depends(get_db)):
     return {"deleted": event_id}
 
 
+# --- salary growth profile (per person) --------------------------------------
+
+class SalaryProfileIn(BaseModel):
+    current_salary: float
+    annual_increase_pct: float = 0
+
+
+@router.get("/salary-profile/{owner}")
+def get_salary_profile_route(owner: Owner, conn: Connection = Depends(get_db)):
+    profile = get_salary_profile(conn, owner)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"No salary profile for '{owner}'")
+    return dict(profile)
+
+
+@router.put("/salary-profile/{owner}")
+def put_salary_profile(owner: Owner, body: SalaryProfileIn, conn: Connection = Depends(get_db)):
+    set_salary_profile(conn, owner, body.current_salary, body.annual_increase_pct)
+    return dict(get_salary_profile(conn, owner))
+
+
 # --- pension params (versioned FERS formula knobs) ---------------------------
 
 class PensionParamsIn(BaseModel):
@@ -145,6 +170,63 @@ def put_pension_profile(owner: Owner, body: PensionProfileIn, conn: Connection =
     set_pension_profile(conn, owner, body.service_start_date, body.high_3_salary,
                          body.mra_age, body.survivor_benefit_fraction)
     return dict(get_pension_profile(conn, owner))
+
+
+@router.delete("/pension-profile/{owner}")
+def delete_pension_profile_route(owner: Owner, conn: Connection = Depends(get_db)):
+    """The 'this person has no FERS pension' path -- e.g. a spouse who isn't
+    a federal employee."""
+    delete_pension_profile(conn, owner)
+    return {"deleted": owner}
+
+
+@router.get("/pension-preview/{owner}")
+def pension_preview(owner: Owner, separation_date: str | None = None, conn: Connection = Depends(get_db)):
+    """Read-only preliminary math for the Pension & Social Security page:
+    years of service, which multiplier tier applies, the high-3 used, and
+    the resulting estimated pension -- computed live as the user edits
+    inputs, using the same formula /solve ultimately feeds Owl. Defaults
+    separation_date to DOB + 62 when not given."""
+    member = household.get_household_member(conn, owner)
+    if member is None:
+        raise HTTPException(status_code=404, detail=f"No household member '{owner}'")
+
+    profile = get_pension_profile(conn, owner)
+    if profile is None:
+        return {"has_pension": False}
+
+    sep_date = (
+        date.fromisoformat(separation_date) if separation_date
+        else household.default_separation_date(member["date_of_birth"])
+    )
+    sep_age = household.age_on(member["date_of_birth"], sep_date)
+
+    high_3_salary = profile["high_3_salary"]
+    if high_3_salary is None:
+        salary_profile = get_salary_profile(conn, owner)
+        if salary_profile is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No high_3_salary override and no salary profile set for '{owner}'",
+            )
+        high_3_salary = compute_high_3(salary_profile, sep_date.year)
+
+    params = get_current_pension_params(conn)
+    result = compute_fers_pension(
+        service_start_date=date.fromisoformat(profile["service_start_date"]),
+        separation_date=sep_date,
+        separation_age=sep_age,
+        high_3_salary=high_3_salary,
+        mra_age=profile["mra_age"],
+        params=params,
+    )
+    return {
+        "has_pension": True,
+        "separation_date": sep_date.isoformat(),
+        "separation_age": sep_age,
+        "high_3_salary_used": high_3_salary,
+        **result,
+    }
 
 
 # --- social security profile (per person) ------------------------------------

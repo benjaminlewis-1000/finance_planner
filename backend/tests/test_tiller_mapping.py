@@ -24,6 +24,7 @@ def test_first_sync_flags_everything_new(tmp_path):
     row = conn.execute("SELECT * FROM account_mappings WHERE account_id = 'acct1'").fetchone()
     assert row["owl_bucket"] == "excluded"
     assert row["needs_review"] == 1
+    assert row["last_seen_balance"] == 1234.56
 
 
 def test_identical_second_sync_is_a_noop(tmp_path):
@@ -53,6 +54,18 @@ def test_drifted_account_is_reflagged(tmp_path):
     assert row["needs_review"] == 1  # re-flagged despite prior manual mapping
     assert row["owl_bucket"] == "taxable"  # previous bucket choice preserved, not reset
     assert row["last_seen_type"] == "Brokerage"
+
+
+def test_balance_updates_on_an_unchanged_account_too(tmp_path):
+    conn = make_conn(tmp_path)
+    sync_accounts(conn, FAKE_ACCOUNTS)
+
+    bumped = [dict(FAKE_ACCOUNTS[0], **{"Last Balance": "$2,000.00"}), FAKE_ACCOUNTS[1]]
+    result = sync_accounts(conn, bumped)
+
+    assert result["unchanged_count"] == 2  # no drift in name/type/institution
+    row = conn.execute("SELECT * FROM account_mappings WHERE account_id = 'acct1'").fetchone()
+    assert row["last_seen_balance"] == 2000.0
 
 
 def test_blank_account_id_row_is_skipped(tmp_path):
