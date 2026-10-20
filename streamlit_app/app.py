@@ -8,6 +8,7 @@ investing in the React/Vite build (step 8), per the build plan.
 import os
 from datetime import date
 
+import pandas as pd
 import requests
 import streamlit as st
 
@@ -90,6 +91,56 @@ def section_household():
                     st.rerun()
 
 
+def _show_contribution_projection(owner: str) -> None:
+    """Year-by-year salary, IRS caps, and contribution amounts -- rows where
+    a cap actually changed from the prior year are highlighted, since real
+    caps move in lumpy, infrequent steps rather than every year."""
+    st.markdown(f"**{owner} -- year-by-year projection**")
+    cols = st.columns(2)
+    num_years = cols[0].slider("Years to project", min_value=5, max_value=40, value=15, key=f"proj_years_{owner}")
+    include_catchup = cols[1].checkbox(
+        "Include catch-up contributions", value=False, key=f"proj_catchup_{owner}",
+    )
+
+    data = api("GET", f"/assumptions/contribution-projection/{owner}", allow_statuses=(400,), params={
+        "num_years": num_years, "include_catchup": include_catchup,
+    })
+    if not data:
+        st.caption("Set a salary profile above to see this.")
+        return
+    if not data["has_contribution_profile"]:
+        st.caption("No contribution profile set -- showing salary and IRS caps only.")
+
+    df = pd.DataFrame(data["rows"]).set_index("year")
+    cap_changed = df["tsp_cap_changed"] | df["ira_cap_changed"]
+
+    st.caption("Salary")
+    st.line_chart(df[["salary"]].rename(columns={"salary": "Salary"}))
+
+    st.caption("Contribution limits & contribution amounts")
+    chart_cols = {
+        "tsp_cap": "TSP cap", "ira_cap": "IRA cap", "tsp_traditional": "TSP traditional",
+        "tsp_roth": "TSP Roth", "agency_match": "Agency match (5%)",
+        "ira_traditional": "IRA traditional", "ira_roth": "Roth IRA", "taxable": "Taxable",
+    }
+    st.line_chart(df[list(chart_cols)].rename(columns=chart_cols))
+
+    table_cols = {"salary": "Salary", **chart_cols}
+    display_df = df[list(table_cols)].rename(columns=table_cols)
+
+    def _highlight_cap_change(row):
+        style = "background-color: #fff3b0" if cap_changed.loc[row.name] else ""
+        return [style] * len(row)
+
+    st.dataframe(
+        display_df.style.apply(_highlight_cap_change, axis=1).format("${:,.0f}"),
+        use_container_width=True,
+    )
+    if cap_changed.any():
+        changed_years = ", ".join(str(y) for y in df.index[cap_changed])
+        st.caption(f"Highlighted rows: a contribution cap increased that year -- {changed_years}.")
+
+
 def section_assumptions():
     st.header("Assumptions")
     owners = [m["owner"] for m in get_household_members()]
@@ -125,6 +176,128 @@ def section_assumptions():
                     "current_salary": current_salary, "annual_increase_pct": increase_pct / 100,
                 })
                 st.rerun()
+
+    st.subheader("Ongoing retirement contributions")
+    st.caption(
+        "Without this, the solve assumes zero ongoing contributions to TSP/IRA/taxable "
+        "during working years -- balances only grow by market return, not by what you "
+        "actually keep putting in. TSP is % of salary (traditional + Roth share one IRS "
+        "limit); IRA and taxable are flat $/year. Agency TSP match is computed "
+        "automatically from the FERS formula (1% automatic + 100% match on the first 3% "
+        "+ 50% on the next 2%), always into traditional TSP."
+    )
+    caps = api("GET", "/assumptions/contribution-caps")
+    if caps:
+        st.caption(
+            f"Current IRS caps (editable below): elective deferral "
+            f"${caps['elective_deferral_limit']:,.0f} (+${caps['elective_deferral_catchup_50']:,.0f} "
+            f"catch-up 50+, +${caps['elective_deferral_catchup_60_63']:,.0f} super catch-up 60-63); "
+            f"IRA ${caps['ira_limit']:,.0f} (+${caps['ira_catchup_50']:,.0f} catch-up 50+). "
+            f"Projected to grow {caps['annual_growth_pct'] * 100:.1f}%/year in ${caps['increment']:,.0f} increments."
+        )
+    with st.expander("Edit IRS contribution caps (adds a new versioned row -- doesn't erase history)"):
+        with st.form("contribution_caps"):
+            cc_date = st.date_input("Effective date", key="cc_date")
+            c1, c2 = st.columns(2)
+            elective_limit = c1.number_input(
+                "Elective deferral limit (TSP, traditional+Roth)",
+                value=float(caps["elective_deferral_limit"]) if caps else 23500.0, step=500.0,
+            )
+            ira_limit_in = c2.number_input(
+                "IRA limit (traditional+Roth)", value=float(caps["ira_limit"]) if caps else 7000.0, step=500.0,
+            )
+            catchup_50 = c1.number_input(
+                "Elective deferral catch-up (50+)",
+                value=float(caps["elective_deferral_catchup_50"]) if caps else 7500.0, step=500.0,
+            )
+            ira_catchup = c2.number_input(
+                "IRA catch-up (50+)", value=float(caps["ira_catchup_50"]) if caps else 1000.0, step=500.0,
+            )
+            catchup_60_63 = st.number_input(
+                "Elective deferral super catch-up (60-63)",
+                value=float(caps["elective_deferral_catchup_60_63"]) if caps else 11250.0, step=500.0,
+            )
+            growth_pct = st.number_input(
+                "Assumed annual cap growth (%)",
+                value=float(caps["annual_growth_pct"]) * 100 if caps else 2.0, step=0.1,
+            )
+            increment = st.number_input(
+                "Cap rounds to the nearest ($)", value=float(caps["increment"]) if caps else 500.0, step=100.0,
+            )
+            note = st.text_input("Note", key="cc_note")
+            if st.form_submit_button("Save new version"):
+                api("PUT", "/assumptions/contribution-caps", json={
+                    "effective_date": cc_date.isoformat(), "elective_deferral_limit": elective_limit,
+                    "elective_deferral_catchup_50": catchup_50, "elective_deferral_catchup_60_63": catchup_60_63,
+                    "ira_limit": ira_limit_in, "ira_catchup_50": ira_catchup,
+                    "annual_growth_pct": growth_pct / 100, "increment": increment, "note": note or None,
+                })
+                st.rerun()
+
+    for owner in owners:
+        existing_ctrb = api("GET", f"/assumptions/contribution-profile/{owner}", allow_statuses=(404,))
+        st.markdown(f"**{owner}**")
+        c1, c2, c3 = st.columns(3)
+        tsp_traditional_pct = c1.number_input(
+            "TSP traditional (%)",
+            value=float(existing_ctrb["tsp_traditional_pct"]) * 100 if existing_ctrb else 0.0,
+            step=0.5, key=f"tsp_trad_{owner}",
+        )
+        tsp_roth_pct = c2.number_input(
+            "TSP Roth (%)", value=float(existing_ctrb["tsp_roth_pct"]) * 100 if existing_ctrb else 0.0,
+            step=0.5, key=f"tsp_roth_{owner}",
+        )
+        tsp_max = c3.checkbox(
+            "Max out TSP", value=bool(existing_ctrb["tsp_max"]) if existing_ctrb else False,
+            key=f"tsp_max_{owner}",
+            help="Contribute the full IRS cap each year as it grows, split traditional:Roth by the ratio of the two % fields above.",
+        )
+        c1, c2, c3 = st.columns(3)
+        ira_traditional = c1.number_input(
+            "IRA traditional ($/year)",
+            value=float(existing_ctrb["ira_traditional_annual"]) if existing_ctrb else 0.0,
+            step=500.0, key=f"ira_trad_{owner}",
+        )
+        ira_roth = c2.number_input(
+            "Roth IRA ($/year)", value=float(existing_ctrb["ira_roth_annual"]) if existing_ctrb else 0.0,
+            step=500.0, key=f"ira_roth_{owner}",
+        )
+        ira_max = c3.checkbox(
+            "Max out IRA", value=bool(existing_ctrb["ira_max"]) if existing_ctrb else False,
+            key=f"ira_max_{owner}",
+            help="Contribute the full IRA cap each year as it grows, split traditional:Roth by the ratio of the two $ fields above.",
+        )
+        taxable_annual = st.number_input(
+            "Taxable investing ($/year, no IRS cap)",
+            value=float(existing_ctrb["taxable_annual"]) if existing_ctrb else 0.0,
+            step=500.0, key=f"taxable_ctrb_{owner}",
+        )
+        if st.button(f"Save contribution profile ({owner})", key=f"save_ctrb_{owner}"):
+            api("PUT", f"/assumptions/contribution-profile/{owner}", json={
+                "tsp_traditional_pct": tsp_traditional_pct / 100, "tsp_roth_pct": tsp_roth_pct / 100,
+                "tsp_max": tsp_max,
+                "ira_traditional_annual": ira_traditional, "ira_roth_annual": ira_roth, "ira_max": ira_max,
+                "taxable_annual": taxable_annual,
+            })
+            st.success("Saved.")
+
+        preview = api("GET", f"/assumptions/contribution-preview/{owner}", allow_statuses=(400,), params={
+            "tsp_traditional_pct": tsp_traditional_pct / 100, "tsp_roth_pct": tsp_roth_pct / 100,
+            "tsp_max": tsp_max,
+            "ira_traditional_annual": ira_traditional, "ira_roth_annual": ira_roth, "ira_max": ira_max,
+            "taxable_annual": taxable_annual,
+        })
+        if preview and preview.get("has_contribution_profile"):
+            st.caption(
+                f"Live, from the fields above (not necessarily saved) -- this year on "
+                f"${preview['salary_used']:,.0f} salary: TSP traditional "
+                f"${preview['tsp_traditional']:,.0f}, TSP Roth ${preview['tsp_roth']:,.0f}, "
+                f"agency match ${preview['agency_match']:,.0f}, IRA traditional "
+                f"${preview['ira_traditional']:,.0f}, Roth IRA ${preview['ira_roth']:,.0f}, "
+                f"taxable ${preview['taxable']:,.0f}."
+            )
+
+        _show_contribution_projection(owner)
 
     st.subheader("Salary steps (manual overrides)")
     steps = api("GET", "/assumptions/salary-steps") or []
@@ -239,38 +412,46 @@ def section_pension_ss():
                 st.rerun()
             st.caption("No pension for this person.")
         else:
-            with st.form(f"pension_profile_{owner}"):
-                service_start_date = st.date_input(
-                    "Service start date",
-                    value=date.fromisoformat(existing["service_start_date"]) if existing else date(2016, 1, 1),
-                    key=f"psd_{owner}",
-                )
-                high_3_salary = st.number_input(
-                    "High-3 salary override ($, leave 0 to use the projected salary growth above)",
-                    value=float(existing["high_3_salary"]) if existing and existing["high_3_salary"] else 0.0,
-                    key=f"h3_{owner}",
-                )
-                mra_age = st.number_input("MRA age", value=float(existing["mra_age"]) if existing else 57.0, key=f"mra_{owner}")
-                survivor_fraction = st.number_input(
-                    "Survivor benefit fraction", value=float(existing["survivor_benefit_fraction"]) if existing else 0.0,
-                    min_value=0.0, max_value=1.0, key=f"surv_{owner}",
-                )
-                if st.form_submit_button(f"Save pension profile ({owner})"):
-                    api("PUT", f"/assumptions/pension-profile/{owner}", json={
-                        "service_start_date": service_start_date.isoformat(),
-                        "high_3_salary": high_3_salary or None,
-                        "mra_age": mra_age, "survivor_benefit_fraction": survivor_fraction,
-                    })
-                    st.rerun()
+            # Plain widgets, not st.form -- each edit reruns the page immediately
+            # so the preview below updates live as you type, instead of only
+            # after a Save click (and even then, only reflecting what got saved).
+            service_start_date = st.date_input(
+                "Service start date",
+                value=date.fromisoformat(existing["service_start_date"]) if existing else date(2016, 1, 1),
+                key=f"psd_{owner}",
+            )
+            high_3_salary = st.number_input(
+                "High-3 salary override ($, leave 0 to use the projected salary growth above)",
+                value=float(existing["high_3_salary"]) if existing and existing["high_3_salary"] else 0.0,
+                key=f"h3_{owner}",
+            )
+            mra_age = st.number_input("MRA age", value=float(existing["mra_age"]) if existing else 57.0, key=f"mra_{owner}")
+            survivor_fraction = st.number_input(
+                "Survivor benefit fraction", value=float(existing["survivor_benefit_fraction"]) if existing else 0.0,
+                min_value=0.0, max_value=1.0, key=f"surv_{owner}",
+            )
+            if st.button(f"Save pension profile ({owner})", key=f"save_pension_{owner}"):
+                api("PUT", f"/assumptions/pension-profile/{owner}", json={
+                    "service_start_date": service_start_date.isoformat(),
+                    "high_3_salary": high_3_salary or None,
+                    "mra_age": mra_age, "survivor_benefit_fraction": survivor_fraction,
+                })
+                st.success("Saved.")
 
-            preview = api("GET", f"/assumptions/pension-preview/{owner}")
+            preview = api("GET", f"/assumptions/pension-preview/{owner}", params={
+                "service_start_date": service_start_date.isoformat(),
+                "mra_age": mra_age,
+                **({"high_3_salary": high_3_salary} if high_3_salary else {}),
+            })
             if preview and preview.get("has_pension"):
-                st.markdown("**Preliminary estimate** (assuming separation at DOB + 62, unless set otherwise under Solve/Scenarios)")
+                st.markdown("**Preliminary estimate** (live, from the fields above -- not necessarily saved; assumes separation at DOB + 62 unless set otherwise under Solve/Scenarios)")
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Years of service", f"{preview['years_of_service']:.1f}")
                 c2.metric("High-3 salary used", f"${preview['high_3_salary_used']:,.0f}")
                 c3.metric("Multiplier used", f"{preview['multiplier_used'] * 100:.2f}%")
                 c4.metric("Est. annual pension", f"${preview['annual_pension']:,.0f}")
+                if preview.get("projected_final_salary") is not None:
+                    st.caption(f"Projected final-year salary: ${preview['projected_final_salary']:,.0f}")
                 st.caption(
                     f"Separation age {preview['separation_age']:.1f} on {preview['separation_date']} "
                     f"-- {preview['eligibility_note']}"
@@ -393,7 +574,7 @@ def _scenario_inputs(owners: list[str], key_prefix: str) -> dict:
     date, not typed -- the backend derives the same value from the same
     inputs when building the plan, so the two can't disagree."""
     members = {m["owner"]: m for m in get_household_members()}
-    separation_date, ss_claiming_age = {}, {}
+    separation_date, ss_claiming_age, include_catchup = {}, {}, {}
     for owner in owners:
         st.markdown(f"**{owner}**")
         dob = date.fromisoformat(members[owner]["date_of_birth"])
@@ -405,14 +586,49 @@ def _scenario_inputs(owners: list[str], key_prefix: str) -> dict:
         ss_age = cols[2].number_input("SS claiming age", value=67.0, key=f"{key_prefix}_ssage_{owner}")
         separation_date[owner] = sep_date.isoformat()
         ss_claiming_age[owner] = ss_age
+        include_catchup[owner] = st.checkbox(
+            f"Assume {owner} makes age-based catch-up contributions (50+, and the 60-63 super catch-up)",
+            value=False, key=f"{key_prefix}_catchup_{owner}",
+        )
 
     objective = st.selectbox("Objective", ["maxSpending", "maxBequest"], key=f"{key_prefix}_objective")
     bequest = st.number_input("Bequest (today's $)", value=0.0, step=10000.0, key=f"{key_prefix}_bequest")
 
     return {
         "separation_date": separation_date,
-        "ss_claiming_age": ss_claiming_age, "objective": objective, "bequest": bequest,
+        "ss_claiming_age": ss_claiming_age, "include_catchup_contributions": include_catchup,
+        "objective": objective, "bequest": bequest,
     }
+
+
+def _show_pension_estimates(owners: list[str], scenario: dict) -> None:
+    """Same preview math as the Pension & Social Security page, but against
+    the separation date actually chosen for this scenario rather than the
+    DOB + 62 default."""
+    any_shown = False
+    for owner in owners:
+        profile = api("GET", f"/assumptions/pension-profile/{owner}", allow_statuses=(404,))
+        if profile is None:
+            continue
+        any_shown = True
+        preview = api("GET", f"/assumptions/pension-preview/{owner}", params={
+            "service_start_date": profile["service_start_date"],
+            "mra_age": profile["mra_age"],
+            "separation_date": scenario["separation_date"].get(owner),
+            **({"high_3_salary": profile["high_3_salary"]} if profile["high_3_salary"] else {}),
+        })
+        if not preview or not preview.get("has_pension"):
+            continue
+        st.markdown(f"**{owner}** -- estimated pension at the chosen separation date")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Years of service", f"{preview['years_of_service']:.1f}")
+        c2.metric("Est. annual pension", f"${preview['annual_pension']:,.0f}")
+        c3.metric("Est. monthly pension", f"${preview['monthly_pension']:,.0f}")
+        st.caption(
+            f"Separation age {preview['separation_age']:.1f} -- {preview['eligibility_note']}"
+        )
+    if not any_shown:
+        st.caption("No pension profile set for anyone in this household.")
 
 
 def _show_solve_result(result: dict):
@@ -435,6 +651,10 @@ def section_solve():
     st.session_state["spreadsheet_id"] = spreadsheet_id
 
     scenario = _scenario_inputs(owners, "solve")
+
+    st.subheader("Estimated pension")
+    _show_pension_estimates(owners, scenario)
+
     force_recalculate = st.checkbox("Force recalculate (bypass cache)")
 
     if st.button("Run solve") and spreadsheet_id:

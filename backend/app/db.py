@@ -119,6 +119,46 @@ def init_db(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
+        -- Ongoing retirement contributions, as % of salary for TSP (traditional
+        -- + Roth share the one elective-deferral limit) and flat $/year for
+        -- IRA/Roth IRA (not salary-based) and taxable (no IRS cap at all).
+        -- Agency match isn't stored here -- it's computed from the TSP
+        -- percentages via the real FERS match formula in contributions.py.
+        -- tsp_max/ira_max: "contribute up to that year's projected cap"
+        -- instead of a fixed %/$ -- the pct/$ fields become the
+        -- traditional:Roth split ratio in that mode (see contributions.py).
+        CREATE TABLE IF NOT EXISTS contribution_profiles (
+            owner TEXT PRIMARY KEY CHECK (owner IN ('self', 'spouse')),
+            tsp_traditional_pct REAL NOT NULL DEFAULT 0,
+            tsp_roth_pct REAL NOT NULL DEFAULT 0,
+            tsp_max INTEGER NOT NULL DEFAULT 0,
+            ira_traditional_annual REAL NOT NULL DEFAULT 0,
+            ira_roth_annual REAL NOT NULL DEFAULT 0,
+            ira_max INTEGER NOT NULL DEFAULT 0,
+            taxable_annual REAL NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        -- Versioned IRS contribution-limit knobs, same "editable, not
+        -- hardcoded" pattern as pension_params. annual_growth_pct/increment
+        -- project a limit into future years not covered by this row (e.g.
+        -- cap grows 2%/year but only moves in $500 steps, so it can sit flat
+        -- for a few years before the next jump).
+        CREATE TABLE IF NOT EXISTS contribution_caps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            effective_date TEXT NOT NULL,
+            elective_deferral_limit REAL NOT NULL DEFAULT 23500,
+            elective_deferral_catchup_50 REAL NOT NULL DEFAULT 7500,
+            elective_deferral_catchup_60_63 REAL NOT NULL DEFAULT 11250,
+            ira_limit REAL NOT NULL DEFAULT 7000,
+            ira_catchup_50 REAL NOT NULL DEFAULT 1000,
+            annual_growth_pct REAL NOT NULL DEFAULT 0.02,
+            increment REAL NOT NULL DEFAULT 500,
+            note TEXT,
+            created_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS household_members (
             owner TEXT PRIMARY KEY CHECK (owner IN ('self', 'spouse')),
             display_name TEXT NOT NULL,
@@ -161,6 +201,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.commit()
     _migrate_account_mappings_for_mixed_bucket(conn)
     _migrate_account_mappings_add_balance_column(conn)
+    _migrate_contribution_profiles_add_max_columns(conn)
 
 
 def _migrate_account_mappings_for_mixed_bucket(conn: sqlite3.Connection) -> None:
@@ -214,4 +255,16 @@ def _migrate_account_mappings_add_balance_column(conn: sqlite3.Connection) -> No
     if "last_seen_balance" in columns:
         return
     conn.execute("ALTER TABLE account_mappings ADD COLUMN last_seen_balance REAL")
+    conn.commit()
+
+
+def _migrate_contribution_profiles_add_max_columns(conn: sqlite3.Connection) -> None:
+    """A pre-existing contribution_profiles table (from before the 'max out'
+    toggle existed) has no tsp_max/ira_max columns -- plain ADD COLUMNs
+    suffice, no CHECK constraint involved."""
+    columns = [row["name"] for row in conn.execute("PRAGMA table_info(contribution_profiles)").fetchall()]
+    if "tsp_max" in columns:
+        return
+    conn.execute("ALTER TABLE contribution_profiles ADD COLUMN tsp_max INTEGER NOT NULL DEFAULT 0")
+    conn.execute("ALTER TABLE contribution_profiles ADD COLUMN ira_max INTEGER NOT NULL DEFAULT 0")
     conn.commit()

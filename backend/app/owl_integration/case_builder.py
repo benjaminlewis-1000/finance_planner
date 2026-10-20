@@ -21,6 +21,11 @@ import owlplanner as owl
 import pandas as pd
 
 from app.assumptions import crud, household
+from app.assumptions.contributions import (
+    compute_contributions_for_year,
+    get_contribution_profile,
+    get_current_contribution_caps,
+)
 from app.assumptions.pension import compute_fers_pension, get_current_pension_params, get_pension_profile
 from app.assumptions.salary import compute_high_3, get_salary_profile, project_salary
 from app.assumptions.social_security import compute_social_security_benefit, get_social_security_profile
@@ -44,6 +49,7 @@ class ScenarioParams:
     separation_date: dict[str, date | None] = field(default_factory=dict)
     separation_age: dict[str, float | None] = field(default_factory=dict)
     ss_claiming_age: dict[str, float | None] = field(default_factory=dict)
+    include_catchup_contributions: dict[str, bool] = field(default_factory=dict)
     objective: str = "maxSpending"
     bequest: float = 0
 
@@ -100,7 +106,8 @@ def _bucket_balances(conn, pulled_accounts: list[dict], owners: list[str]) -> di
     }
 
 
-def _hfp_dataframe(conn, owner: str, owners: list[str], years: list[int]) -> pd.DataFrame:
+def _hfp_dataframe(conn, owner: str, owners: list[str], years: list[int], date_of_birth: str,
+                    separation_year: int | None, include_catchup: bool) -> pd.DataFrame:
     """A 'joint' one-off event is split 50/50 across both people's HFP frames
     when there's a spouse, same convention as joint account balances; with no
     spouse in the household it falls entirely on 'self'."""
@@ -124,6 +131,11 @@ def _hfp_dataframe(conn, owner: str, owners: list[str], years: list[int]) -> pd.
                 if year >= step_year:
                     wages_by_year[year] = step["annual_amount"]
 
+    # Wages (and therefore contributions, below) stop at separation -- you
+    # can't earn a federal salary or contribute to TSP/IRA after leaving.
+    if separation_year is not None:
+        wages_by_year = {year: amount for year, amount in wages_by_year.items() if year < separation_year}
+
     events_by_year: dict[int, float] = {}
     for event in event_rows:
         event_year = date.fromisoformat(event["event_date"]).year
@@ -132,10 +144,34 @@ def _hfp_dataframe(conn, owner: str, owners: list[str], years: list[int]) -> pd.
             amount = amount / 2
         events_by_year[event_year] = events_by_year.get(event_year, 0) + amount
 
+    tsp_traditional_by_year, tsp_roth_by_year = {}, {}
+    ira_traditional_by_year, ira_roth_by_year = {}, {}
+    taxable_ctrb_by_year = {}
+    contribution_profile = get_contribution_profile(conn, owner)
+    if contribution_profile is not None:
+        caps = get_current_contribution_caps(conn)
+        cap_base_year = date.fromisoformat(caps["effective_date"]).year
+        for year, salary in wages_by_year.items():
+            c = compute_contributions_for_year(
+                contribution_profile, caps, salary, date_of_birth, year, cap_base_year, include_catchup,
+            )
+            # Agency match always lands in traditional TSP, same column Owl
+            # sums with "IRA ctrb" into the tax-deferred bucket.
+            tsp_traditional_by_year[year] = c["tsp_traditional"] + c["agency_match"]
+            tsp_roth_by_year[year] = c["tsp_roth"]
+            ira_traditional_by_year[year] = c["ira_traditional"]
+            ira_roth_by_year[year] = c["ira_roth"]
+            taxable_ctrb_by_year[year] = c["taxable"]
+
     return pd.DataFrame({
         "year": years,
         "anticipated wages": [wages_by_year.get(year, 0) for year in years],
         "big-ticket items": [events_by_year.get(year, 0) for year in years],
+        "401k ctrb": [tsp_traditional_by_year.get(year, 0) for year in years],
+        "Roth 401k ctrb": [tsp_roth_by_year.get(year, 0) for year in years],
+        "IRA ctrb": [ira_traditional_by_year.get(year, 0) for year in years],
+        "Roth IRA ctrb": [ira_roth_by_year.get(year, 0) for year in years],
+        "taxable ctrb": [taxable_ctrb_by_year.get(year, 0) for year in years],
     })
 
 
@@ -202,10 +238,16 @@ def build_plan(conn, pulled_accounts: list[dict], scenario: ScenarioParams) -> o
 
     this_year = date.today().year
     horizon_years = list(range(this_year, this_year + max(life_expectancies) + 1))
-    hfp = {
-        member["display_name"]: _hfp_dataframe(conn, member["owner"], owners, horizon_years)
-        for member in members
-    }
+    hfp = {}
+    for member in members:
+        owner = member["owner"]
+        sep_date = scenario.separation_date.get(owner)
+        hfp[member["display_name"]] = _hfp_dataframe(
+            conn, owner, owners, horizon_years,
+            date_of_birth=member["date_of_birth"],
+            separation_year=sep_date.year if sep_date else None,
+            include_catchup=scenario.include_catchup_contributions.get(owner, False),
+        )
     plan.readHFP(hfp)
 
     pension_amounts, pension_ages, survivor_fractions = [], [], []

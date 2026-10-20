@@ -18,6 +18,15 @@ def assumptions_fingerprint(conn: sqlite3.Connection) -> dict:
         "salary_profiles": rows(
             "SELECT owner, current_salary, annual_increase_pct, updated_at FROM salary_profiles ORDER BY owner"
         ),
+        "contribution_profiles": rows(
+            "SELECT owner, tsp_traditional_pct, tsp_roth_pct, tsp_max, ira_traditional_annual, "
+            "ira_roth_annual, ira_max, taxable_annual, updated_at FROM contribution_profiles ORDER BY owner"
+        ),
+        "current_contribution_caps": rows(
+            "SELECT id, effective_date, elective_deferral_limit, elective_deferral_catchup_50, "
+            "elective_deferral_catchup_60_63, ira_limit, ira_catchup_50, annual_growth_pct, increment "
+            "FROM contribution_caps ORDER BY effective_date DESC, id DESC LIMIT 1"
+        ),
         "one_off_events": rows("SELECT owner, event_date, amount, updated_at FROM one_off_events ORDER BY id"),
         "household_members": rows(
             "SELECT owner, display_name, date_of_birth, life_expectancy, updated_at FROM household_members ORDER BY owner"

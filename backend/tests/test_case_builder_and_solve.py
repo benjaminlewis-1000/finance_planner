@@ -5,10 +5,12 @@ the project's 'don't guess at the Owl API, verify it' rule."""
 from datetime import date, timedelta
 
 from app.assumptions import crud, household
+from app.assumptions.contributions import set_contribution_profile
 from app.assumptions.pension import set_pension_profile
+from app.assumptions.salary import set_salary_profile
 from app.assumptions.social_security import set_social_security_profile
 from app.db import get_connection, init_db
-from app.owl_integration.case_builder import ScenarioParams, build_plan
+from app.owl_integration.case_builder import ScenarioParams, _hfp_dataframe, build_plan
 from app.owl_integration.solve import solve_scenario
 
 FAKE_ACCOUNTS = [
@@ -75,6 +77,44 @@ def test_solve_scenario_caches_identical_inputs(tmp_path):
     second = solve_scenario(conn, FAKE_ACCOUNTS, scenario, fingerprint)
     assert second["from_cache"] is True
     assert second["metrics"] == first["metrics"]
+
+
+def test_hfp_dataframe_zeroes_wages_and_contributions_at_separation(tmp_path):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    this_year = date.today().year
+    set_salary_profile(conn, owner="self", current_salary=100_000, annual_increase_pct=0.03)
+    set_contribution_profile(conn, owner="self", tsp_traditional_pct=0.05, tsp_roth_pct=0.05)
+
+    years = list(range(this_year, this_year + 10))
+    separation_year = this_year + 5
+    df = _hfp_dataframe(
+        conn, owner="self", owners=["self"], years=years, date_of_birth="1988-06-01",
+        separation_year=separation_year, include_catchup=False,
+    )
+
+    before = df[df["year"] < separation_year]
+    after = df[df["year"] >= separation_year]
+    assert (before["anticipated wages"] > 0).all()
+    assert (before["401k ctrb"] > 0).all()
+    assert (after["anticipated wages"] == 0).all()
+    assert (after["401k ctrb"] == 0).all()
+    assert (after["Roth 401k ctrb"] == 0).all()
+
+
+def test_hfp_dataframe_no_contribution_profile_means_zero_contributions(tmp_path):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    this_year = date.today().year
+    set_salary_profile(conn, owner="self", current_salary=100_000, annual_increase_pct=0.03)
+    # No contribution_profile set.
+
+    df = _hfp_dataframe(
+        conn, owner="self", owners=["self"], years=[this_year], date_of_birth="1988-06-01",
+        separation_year=None, include_catchup=False,
+    )
+    assert df["401k ctrb"].iloc[0] == 0
+    assert df["anticipated wages"].iloc[0] > 0
 
 
 def test_solve_scenario_force_recalculate_bypasses_cache(tmp_path):

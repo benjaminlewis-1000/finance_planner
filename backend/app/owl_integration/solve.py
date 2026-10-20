@@ -40,6 +40,7 @@ def compute_cache_key(pulled_accounts: list[dict], scenario: ScenarioParams, ass
         "separation_date": {k: (v.isoformat() if v else None) for k, v in scenario.separation_date.items()},
         "separation_age": scenario.separation_age,
         "ss_claiming_age": scenario.ss_claiming_age,
+        "include_catchup_contributions": scenario.include_catchup_contributions,
         "objective": scenario.objective,
         "bequest": scenario.bequest,
         "assumptions_fingerprint": assumptions_fingerprint,

@@ -6,6 +6,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.assumptions import crud, household
+from app.assumptions.contributions import (
+    compute_contributions_for_year,
+    delete_contribution_profile,
+    get_contribution_profile,
+    get_current_contribution_caps,
+    set_contribution_caps,
+    set_contribution_profile,
+)
 from app.assumptions.pension import (
     compute_fers_pension,
     delete_pension_profile,
@@ -14,7 +22,7 @@ from app.assumptions.pension import (
     set_pension_params,
     set_pension_profile,
 )
-from app.assumptions.salary import compute_high_3, get_salary_profile, set_salary_profile
+from app.assumptions.salary import compute_high_3, get_salary_profile, project_salary, set_salary_profile
 from app.assumptions.social_security import get_social_security_profile, set_social_security_profile
 from app.db import get_db
 
@@ -124,6 +132,178 @@ def put_salary_profile(owner: Owner, body: SalaryProfileIn, conn: Connection = D
     return dict(get_salary_profile(conn, owner))
 
 
+# --- contribution caps (versioned IRS limits) --------------------------------
+
+class ContributionCapsIn(BaseModel):
+    effective_date: str
+    elective_deferral_limit: float
+    elective_deferral_catchup_50: float
+    elective_deferral_catchup_60_63: float
+    ira_limit: float
+    ira_catchup_50: float
+    annual_growth_pct: float = 0.02
+    increment: float = 500
+    note: str | None = None
+
+
+@router.get("/contribution-caps")
+def get_contribution_caps_route(conn: Connection = Depends(get_db)):
+    return dict(get_current_contribution_caps(conn))
+
+
+@router.put("/contribution-caps")
+def put_contribution_caps(body: ContributionCapsIn, conn: Connection = Depends(get_db)):
+    caps_id = set_contribution_caps(
+        conn, body.effective_date, body.elective_deferral_limit, body.elective_deferral_catchup_50,
+        body.elective_deferral_catchup_60_63, body.ira_limit, body.ira_catchup_50,
+        body.annual_growth_pct, body.increment, body.note,
+    )
+    return {"id": caps_id}
+
+
+# --- contribution profile (per person) ---------------------------------------
+
+class ContributionProfileIn(BaseModel):
+    tsp_traditional_pct: float = 0
+    tsp_roth_pct: float = 0
+    tsp_max: bool = False
+    ira_traditional_annual: float = 0
+    ira_roth_annual: float = 0
+    ira_max: bool = False
+    taxable_annual: float = 0
+
+
+@router.get("/contribution-profile/{owner}")
+def get_contribution_profile_route(owner: Owner, conn: Connection = Depends(get_db)):
+    profile = get_contribution_profile(conn, owner)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"No contribution profile for '{owner}'")
+    return dict(profile)
+
+
+@router.put("/contribution-profile/{owner}")
+def put_contribution_profile(owner: Owner, body: ContributionProfileIn, conn: Connection = Depends(get_db)):
+    set_contribution_profile(conn, owner, body.tsp_traditional_pct, body.tsp_roth_pct,
+                              body.ira_traditional_annual, body.ira_roth_annual, body.taxable_annual,
+                              body.tsp_max, body.ira_max)
+    return dict(get_contribution_profile(conn, owner))
+
+
+@router.delete("/contribution-profile/{owner}")
+def delete_contribution_profile_route(owner: Owner, conn: Connection = Depends(get_db)):
+    delete_contribution_profile(conn, owner)
+    return {"deleted": owner}
+
+
+@router.get("/contribution-preview/{owner}")
+def contribution_preview(
+    owner: Owner,
+    year: int | None = None,
+    include_catchup: bool = False,
+    tsp_traditional_pct: float | None = None,
+    tsp_roth_pct: float | None = None,
+    tsp_max: bool | None = None,
+    ira_traditional_annual: float | None = None,
+    ira_roth_annual: float | None = None,
+    ira_max: bool | None = None,
+    taxable_annual: float | None = None,
+    conn: Connection = Depends(get_db),
+):
+    """Read-only: what this year's (or a given year's) contributions and
+    agency match actually come out to -- lets you sanity-check the cap/match
+    math without running a full solve.
+
+    The profile fields are query overrides (same pattern as pension-preview)
+    so the UI can preview whatever's currently in its input boxes, not only
+    what's been saved -- each falls back to the saved contribution_profile
+    when omitted entirely."""
+    member = household.get_household_member(conn, owner)
+    if member is None:
+        raise HTTPException(status_code=404, detail=f"No household member '{owner}'")
+
+    overrides = {
+        "tsp_traditional_pct": tsp_traditional_pct, "tsp_roth_pct": tsp_roth_pct, "tsp_max": tsp_max,
+        "ira_traditional_annual": ira_traditional_annual, "ira_roth_annual": ira_roth_annual, "ira_max": ira_max,
+        "taxable_annual": taxable_annual,
+    }
+    profile = get_contribution_profile(conn, owner)
+    if profile is None and all(v is None for v in overrides.values()):
+        return {"has_contribution_profile": False}
+
+    effective_profile = {
+        field: (value if value is not None else (profile[field] if profile else (False if field.endswith("_max") else 0.0)))
+        for field, value in overrides.items()
+    }
+
+    salary_profile = get_salary_profile(conn, owner)
+    if salary_profile is None:
+        raise HTTPException(status_code=400, detail=f"No salary profile set for '{owner}'")
+
+    target_year = year or date.today().year
+    salary = project_salary(salary_profile, target_year)
+
+    caps = get_current_contribution_caps(conn)
+    cap_base_year = date.fromisoformat(caps["effective_date"]).year
+    result = compute_contributions_for_year(
+        effective_profile, caps, salary, member["date_of_birth"], target_year, cap_base_year, include_catchup,
+    )
+    return {"has_contribution_profile": True, "year": target_year, "salary_used": salary, **result}
+
+
+@router.get("/contribution-projection/{owner}")
+def contribution_projection(owner: Owner, num_years: int = 15, include_catchup: bool = False,
+                             conn: Connection = Depends(get_db)):
+    """Year-by-year salary, cap, and contribution figures for the
+    Assumptions page's chart/table -- flags years where either cap actually
+    changed from the prior year, since real IRS caps move in lumpy,
+    infrequent steps, not every year. Still returns salary/cap rows (with
+    zeroed contributions) when there's no saved contribution_profile, so the
+    cap-growth chart works on its own."""
+    member = household.get_household_member(conn, owner)
+    if member is None:
+        raise HTTPException(status_code=404, detail=f"No household member '{owner}'")
+
+    salary_profile = get_salary_profile(conn, owner)
+    if salary_profile is None:
+        raise HTTPException(status_code=400, detail=f"No salary profile set for '{owner}'")
+
+    profile = get_contribution_profile(conn, owner)
+    effective_profile = profile if profile is not None else {
+        "tsp_traditional_pct": 0.0, "tsp_roth_pct": 0.0, "tsp_max": False,
+        "ira_traditional_annual": 0.0, "ira_roth_annual": 0.0, "ira_max": False,
+        "taxable_annual": 0.0,
+    }
+
+    caps = get_current_contribution_caps(conn)
+    cap_base_year = date.fromisoformat(caps["effective_date"]).year
+
+    this_year = date.today().year
+    rows = []
+    prev_tsp_cap = prev_ira_cap = None
+    for year in range(this_year, this_year + num_years):
+        salary = project_salary(salary_profile, year)
+        result = compute_contributions_for_year(
+            effective_profile, caps, salary, member["date_of_birth"], year, cap_base_year, include_catchup,
+        )
+        rows.append({
+            "year": year,
+            "salary": salary,
+            "tsp_cap": result["tsp_cap_used"],
+            "tsp_cap_changed": prev_tsp_cap is not None and result["tsp_cap_used"] != prev_tsp_cap,
+            "ira_cap": result["ira_cap_used"],
+            "ira_cap_changed": prev_ira_cap is not None and result["ira_cap_used"] != prev_ira_cap,
+            "tsp_traditional": result["tsp_traditional"],
+            "tsp_roth": result["tsp_roth"],
+            "agency_match": result["agency_match"],
+            "ira_traditional": result["ira_traditional"],
+            "ira_roth": result["ira_roth"],
+            "taxable": result["taxable"],
+        })
+        prev_tsp_cap, prev_ira_cap = result["tsp_cap_used"], result["ira_cap_used"]
+
+    return {"has_contribution_profile": profile is not None, "rows": rows}
+
+
 # --- pension params (versioned FERS formula knobs) ---------------------------
 
 class PensionParamsIn(BaseModel):
@@ -181,19 +361,37 @@ def delete_pension_profile_route(owner: Owner, conn: Connection = Depends(get_db
 
 
 @router.get("/pension-preview/{owner}")
-def pension_preview(owner: Owner, separation_date: str | None = None, conn: Connection = Depends(get_db)):
-    """Read-only preliminary math for the Pension & Social Security page:
-    years of service, which multiplier tier applies, the high-3 used, and
-    the resulting estimated pension -- computed live as the user edits
-    inputs, using the same formula /solve ultimately feeds Owl. Defaults
-    separation_date to DOB + 62 when not given."""
+def pension_preview(
+    owner: Owner,
+    service_start_date: str | None = None,
+    mra_age: float | None = None,
+    high_3_salary: float | None = None,
+    separation_date: str | None = None,
+    conn: Connection = Depends(get_db),
+):
+    """Read-only preliminary math: years of service, which multiplier tier
+    applies, the high-3 and final-year salary used, and the resulting
+    estimated pension -- same formula /solve feeds Owl.
+
+    service_start_date/mra_age/high_3_salary are query overrides so a caller
+    (the Pension page, mid-edit before any Save) can preview against
+    whatever's currently in its input fields rather than only what's been
+    persisted -- each falls back to the saved pension_profile when omitted.
+    Defaults separation_date to DOB + 62 when not given (the Solve page
+    instead passes the scenario's actual chosen separation date)."""
     member = household.get_household_member(conn, owner)
     if member is None:
         raise HTTPException(status_code=404, detail=f"No household member '{owner}'")
 
     profile = get_pension_profile(conn, owner)
-    if profile is None:
-        return {"has_pension": False}
+    if service_start_date is None:
+        if profile is None:
+            return {"has_pension": False}
+        service_start_date = profile["service_start_date"]
+    if mra_age is None:
+        mra_age = profile["mra_age"] if profile else 57
+    if high_3_salary is None and profile is not None:
+        high_3_salary = profile["high_3_salary"]
 
     sep_date = (
         date.fromisoformat(separation_date) if separation_date
@@ -201,23 +399,23 @@ def pension_preview(owner: Owner, separation_date: str | None = None, conn: Conn
     )
     sep_age = household.age_on(member["date_of_birth"], sep_date)
 
-    high_3_salary = profile["high_3_salary"]
+    salary_profile = get_salary_profile(conn, owner)
     if high_3_salary is None:
-        salary_profile = get_salary_profile(conn, owner)
         if salary_profile is None:
             raise HTTPException(
                 status_code=400,
                 detail=f"No high_3_salary override and no salary profile set for '{owner}'",
             )
         high_3_salary = compute_high_3(salary_profile, sep_date.year)
+    projected_final_salary = project_salary(salary_profile, sep_date.year) if salary_profile else None
 
     params = get_current_pension_params(conn)
     result = compute_fers_pension(
-        service_start_date=date.fromisoformat(profile["service_start_date"]),
+        service_start_date=date.fromisoformat(service_start_date),
         separation_date=sep_date,
         separation_age=sep_age,
         high_3_salary=high_3_salary,
-        mra_age=profile["mra_age"],
+        mra_age=mra_age,
         params=params,
     )
     return {
@@ -225,6 +423,7 @@ def pension_preview(owner: Owner, separation_date: str | None = None, conn: Conn
         "separation_date": sep_date.isoformat(),
         "separation_age": sep_age,
         "high_3_salary_used": high_3_salary,
+        "projected_final_salary": projected_final_salary,
         **result,
     }
 

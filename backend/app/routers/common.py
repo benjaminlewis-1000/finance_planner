@@ -19,6 +19,7 @@ class ScenarioRequest(BaseModel):
     spreadsheet_id: str
     separation_date: dict[Owner, date | None] = {}
     ss_claiming_age: dict[Owner, float | None] = {}
+    include_catchup_contributions: dict[Owner, bool] = {}
     objective: Literal["maxSpending", "maxBequest"] = "maxSpending"
     bequest: float = 0
     force_recalculate: bool = False
@@ -39,6 +40,7 @@ class ScenarioRequest(BaseModel):
             separation_date=dict(self.separation_date),
             separation_age=separation_age,
             ss_claiming_age=dict(self.ss_claiming_age),
+            include_catchup_contributions=dict(self.include_catchup_contributions),
             objective=self.objective,
             bequest=self.bequest,
         )

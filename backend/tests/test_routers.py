@@ -111,6 +111,123 @@ def test_salary_profile_404_when_unset(client):
     assert resp.status_code == 404
 
 
+def test_contribution_profile_round_trip(client):
+    api, conn = client
+    resp = api.put("/assumptions/contribution-profile/self", json={
+        "tsp_traditional_pct": 0.05, "tsp_roth_pct": 0.05,
+        "ira_traditional_annual": 0, "ira_roth_annual": 7000, "taxable_annual": 0,
+    })
+    assert resp.status_code == 200
+    assert resp.json()["tsp_roth_pct"] == 0.05
+
+    resp = api.delete("/assumptions/contribution-profile/self")
+    assert resp.status_code == 200
+    assert api.get("/assumptions/contribution-profile/self").status_code == 404
+
+
+def test_contribution_caps_defaults_and_versioning(client):
+    api, conn = client
+    resp = api.get("/assumptions/contribution-caps")
+    assert resp.status_code == 200
+    assert resp.json()["elective_deferral_limit"] > 0
+
+    resp = api.put("/assumptions/contribution-caps", json={
+        "effective_date": "2030-01-01", "elective_deferral_limit": 30000,
+        "elective_deferral_catchup_50": 8000, "elective_deferral_catchup_60_63": 12000,
+        "ira_limit": 8000, "ira_catchup_50": 1200,
+    })
+    assert resp.status_code == 200
+    assert api.get("/assumptions/contribution-caps").json()["elective_deferral_limit"] == 30000
+
+
+def test_contribution_preview(client):
+    api, conn = client
+    seed_household(conn)
+    api.put("/assumptions/salary-profile/self", json={
+        "current_salary": 100000, "annual_increase_pct": 0.03,
+    })
+    api.put("/assumptions/contribution-profile/self", json={
+        "tsp_traditional_pct": 0.05, "tsp_roth_pct": 0.05,
+    })
+
+    resp = api.get("/assumptions/contribution-preview/self")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["has_contribution_profile"] is True
+    assert body["tsp_traditional"] == pytest.approx(body["salary_used"] * 0.05)
+    assert body["agency_match"] == pytest.approx(body["salary_used"] * 0.05)
+
+
+def test_contribution_preview_no_profile(client):
+    api, conn = client
+    seed_household(conn)
+    resp = api.get("/assumptions/contribution-preview/self")
+    assert resp.json() == {"has_contribution_profile": False}
+
+
+def test_contribution_profile_max_round_trip(client):
+    api, conn = client
+    resp = api.put("/assumptions/contribution-profile/self", json={
+        "tsp_traditional_pct": 0.5, "tsp_roth_pct": 0.5, "tsp_max": True,
+        "ira_traditional_annual": 1, "ira_roth_annual": 1, "ira_max": True,
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["tsp_max"] == 1
+    assert body["ira_max"] == 1
+
+
+def test_contribution_preview_max_mode_override(client):
+    api, conn = client
+    seed_household(conn)
+    api.put("/assumptions/salary-profile/self", json={"current_salary": 100000, "annual_increase_pct": 0.03})
+
+    resp = api.get("/assumptions/contribution-preview/self", params={
+        "tsp_traditional_pct": 1, "tsp_roth_pct": 1, "tsp_max": True,
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["tsp_traditional"] == pytest.approx(body["tsp_roth"])
+
+
+def test_contribution_projection_returns_a_row_per_year(client):
+    api, conn = client
+    seed_household(conn)
+    api.put("/assumptions/salary-profile/self", json={"current_salary": 100000, "annual_increase_pct": 0.03})
+    api.put("/assumptions/contribution-profile/self", json={
+        "tsp_traditional_pct": 0.05, "tsp_roth_pct": 0.05,
+    })
+
+    resp = api.get("/assumptions/contribution-projection/self", params={"num_years": 5})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["has_contribution_profile"] is True
+    assert len(body["rows"]) == 5
+    first = body["rows"][0]
+    assert first["tsp_traditional"] == pytest.approx(first["salary"] * 0.05)
+    assert first["tsp_cap_changed"] is False  # no prior year to compare against
+
+
+def test_contribution_projection_without_profile_still_shows_salary_and_caps(client):
+    api, conn = client
+    seed_household(conn)
+    api.put("/assumptions/salary-profile/self", json={"current_salary": 100000, "annual_increase_pct": 0.03})
+
+    resp = api.get("/assumptions/contribution-projection/self", params={"num_years": 3})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["has_contribution_profile"] is False
+    assert body["rows"][0]["salary"] > 0
+    assert body["rows"][0]["tsp_traditional"] == 0
+
+
+def test_contribution_projection_400_without_salary_profile(client):
+    api, conn = client
+    seed_household(conn)
+    resp = api.get("/assumptions/contribution-projection/self")
+    assert resp.status_code == 400
+
+
 def test_pension_preview_uses_salary_profile_for_high_3(client):
     api, conn = client
     seed_household(conn)
@@ -142,6 +259,34 @@ def test_pension_preview_400_without_high_3_or_salary_profile(client):
     api.put("/assumptions/pension-profile/self", json={"service_start_date": "2016-12-11"})
     resp = api.get("/assumptions/pension-preview/self")
     assert resp.status_code == 400
+
+
+def test_pension_preview_overrides_work_before_any_save(client):
+    # The Pension page calls this with whatever's in its input boxes, every
+    # keystroke -- it must work even when nothing has been saved yet.
+    api, conn = client
+    seed_household(conn)
+    api.put("/assumptions/salary-profile/self", json={
+        "current_salary": 100000, "annual_increase_pct": 0.03,
+    })
+    resp = api.get("/assumptions/pension-preview/self", params={
+        "service_start_date": "2016-12-11", "mra_age": 57, "separation_date": "2050-06-01",
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["has_pension"] is True
+    assert api.get("/assumptions/pension-profile/self").status_code == 404  # still never saved
+
+
+def test_pension_preview_includes_projected_final_salary(client):
+    api, conn = client
+    seed_household(conn)
+    api.put("/assumptions/pension-profile/self", json={"service_start_date": "2016-12-11"})
+    api.put("/assumptions/salary-profile/self", json={
+        "current_salary": 100000, "annual_increase_pct": 0.03,
+    })
+    resp = api.get("/assumptions/pension-preview/self", params={"separation_date": "2050-06-01"})
+    assert resp.json()["projected_final_salary"] is not None
 
 
 def test_household_member_round_trip(client):
