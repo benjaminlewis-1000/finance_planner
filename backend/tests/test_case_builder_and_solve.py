@@ -102,6 +102,25 @@ def test_hfp_dataframe_zeroes_wages_and_contributions_at_separation(tmp_path):
     assert (after["Roth 401k ctrb"] == 0).all()
 
 
+def test_hfp_dataframe_ira_contributions_flow_with_zero_salary(tmp_path):
+    # Regression: contributions used to be computed only for years present
+    # in wages_by_year, so a non-earning spouse (no salary_profile/steps)
+    # funding a spousal Roth IRA would never show up in the actual solve at
+    # all, even with a saved contribution_profile.
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    this_year = date.today().year
+    set_contribution_profile(conn, owner="self", ira_roth_annual=7_000)
+    # Deliberately no salary_profile and no salary_steps for "self".
+
+    df = _hfp_dataframe(
+        conn, owner="self", owners=["self"], years=[this_year, this_year + 1],
+        date_of_birth="1988-06-01", separation_year=None, include_catchup=False,
+    )
+    assert (df["anticipated wages"] == 0).all()
+    assert (df["Roth IRA ctrb"] == 7_000).all()
+
+
 def test_hfp_dataframe_no_contribution_profile_means_zero_contributions(tmp_path):
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)

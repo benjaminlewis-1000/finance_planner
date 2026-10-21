@@ -167,9 +167,11 @@ class ContributionProfileIn(BaseModel):
     tsp_traditional_pct: float = 0
     tsp_roth_pct: float = 0
     tsp_max: bool = False
+    tsp_roth_share: float = 0.5
     ira_traditional_annual: float = 0
     ira_roth_annual: float = 0
     ira_max: bool = False
+    ira_roth_share: float = 1.0
     taxable_annual: float = 0
 
 
@@ -185,7 +187,7 @@ def get_contribution_profile_route(owner: Owner, conn: Connection = Depends(get_
 def put_contribution_profile(owner: Owner, body: ContributionProfileIn, conn: Connection = Depends(get_db)):
     set_contribution_profile(conn, owner, body.tsp_traditional_pct, body.tsp_roth_pct,
                               body.ira_traditional_annual, body.ira_roth_annual, body.taxable_annual,
-                              body.tsp_max, body.ira_max)
+                              body.tsp_max, body.ira_max, body.tsp_roth_share, body.ira_roth_share)
     return dict(get_contribution_profile(conn, owner))
 
 
@@ -203,9 +205,11 @@ def contribution_preview(
     tsp_traditional_pct: float | None = None,
     tsp_roth_pct: float | None = None,
     tsp_max: bool | None = None,
+    tsp_roth_share: float | None = None,
     ira_traditional_annual: float | None = None,
     ira_roth_annual: float | None = None,
     ira_max: bool | None = None,
+    ira_roth_share: float | None = None,
     taxable_annual: float | None = None,
     conn: Connection = Depends(get_db),
 ):
@@ -216,31 +220,34 @@ def contribution_preview(
     The profile fields are query overrides (same pattern as pension-preview)
     so the UI can preview whatever's currently in its input boxes, not only
     what's been saved -- each falls back to the saved contribution_profile
-    when omitted entirely."""
+    when omitted entirely. No salary profile is required: IRA/taxable aren't
+    salary-based at all (e.g. a spousal Roth IRA funded by the other
+    spouse's income), so a missing salary profile just means $0 salary,
+    which only zeroes the TSP/match figures, not IRA/taxable."""
     member = household.get_household_member(conn, owner)
     if member is None:
         raise HTTPException(status_code=404, detail=f"No household member '{owner}'")
 
     overrides = {
         "tsp_traditional_pct": tsp_traditional_pct, "tsp_roth_pct": tsp_roth_pct, "tsp_max": tsp_max,
+        "tsp_roth_share": tsp_roth_share,
         "ira_traditional_annual": ira_traditional_annual, "ira_roth_annual": ira_roth_annual, "ira_max": ira_max,
+        "ira_roth_share": ira_roth_share,
         "taxable_annual": taxable_annual,
     }
     profile = get_contribution_profile(conn, owner)
     if profile is None and all(v is None for v in overrides.values()):
         return {"has_contribution_profile": False}
 
+    defaults = {"tsp_max": False, "ira_max": False, "tsp_roth_share": 0.5, "ira_roth_share": 1.0}
     effective_profile = {
-        field: (value if value is not None else (profile[field] if profile else (False if field.endswith("_max") else 0.0)))
+        field: (value if value is not None else (profile[field] if profile else defaults.get(field, 0.0)))
         for field, value in overrides.items()
     }
 
     salary_profile = get_salary_profile(conn, owner)
-    if salary_profile is None:
-        raise HTTPException(status_code=400, detail=f"No salary profile set for '{owner}'")
-
     target_year = year or date.today().year
-    salary = project_salary(salary_profile, target_year)
+    salary = project_salary(salary_profile, target_year) if salary_profile else 0.0
 
     caps = get_current_contribution_caps(conn)
     cap_base_year = date.fromisoformat(caps["effective_date"]).year
@@ -256,21 +263,20 @@ def contribution_projection(owner: Owner, num_years: int = 15, include_catchup: 
     """Year-by-year salary, cap, and contribution figures for the
     Assumptions page's chart/table -- flags years where either cap actually
     changed from the prior year, since real IRS caps move in lumpy,
-    infrequent steps, not every year. Still returns salary/cap rows (with
-    zeroed contributions) when there's no saved contribution_profile, so the
-    cap-growth chart works on its own."""
+    infrequent steps, not every year. Works with no salary profile at all
+    (salary is just 0 -- IRA/taxable aren't salary-based, e.g. a spousal
+    Roth IRA) and with no contribution_profile (zeroed contributions, so the
+    salary/cap-growth chart still works on its own)."""
     member = household.get_household_member(conn, owner)
     if member is None:
         raise HTTPException(status_code=404, detail=f"No household member '{owner}'")
 
     salary_profile = get_salary_profile(conn, owner)
-    if salary_profile is None:
-        raise HTTPException(status_code=400, detail=f"No salary profile set for '{owner}'")
 
     profile = get_contribution_profile(conn, owner)
     effective_profile = profile if profile is not None else {
-        "tsp_traditional_pct": 0.0, "tsp_roth_pct": 0.0, "tsp_max": False,
-        "ira_traditional_annual": 0.0, "ira_roth_annual": 0.0, "ira_max": False,
+        "tsp_traditional_pct": 0.0, "tsp_roth_pct": 0.0, "tsp_max": False, "tsp_roth_share": 0.5,
+        "ira_traditional_annual": 0.0, "ira_roth_annual": 0.0, "ira_max": False, "ira_roth_share": 1.0,
         "taxable_annual": 0.0,
     }
 
@@ -281,7 +287,7 @@ def contribution_projection(owner: Owner, num_years: int = 15, include_catchup: 
     rows = []
     prev_tsp_cap = prev_ira_cap = None
     for year in range(this_year, this_year + num_years):
-        salary = project_salary(salary_profile, year)
+        salary = project_salary(salary_profile, year) if salary_profile else 0.0
         result = compute_contributions_for_year(
             effective_profile, caps, salary, member["date_of_birth"], year, cap_base_year, include_catchup,
         )

@@ -142,9 +142,9 @@ def test_ira_contributions_scaled_down_when_over_the_cap(tmp_path):
     assert result["ira_traditional"] + result["ira_roth"] == pytest.approx(result["ira_cap_used"])
 
 
-def test_tsp_max_mode_contributes_the_full_cap_split_by_ratio(tmp_path):
+def test_tsp_max_mode_splits_by_explicit_roth_share(tmp_path):
     conn = make_conn(tmp_path)
-    set_contribution_profile(conn, "self", tsp_traditional_pct=1, tsp_roth_pct=1, tsp_max=True)
+    set_contribution_profile(conn, "self", tsp_max=True, tsp_roth_share=0.5)
     profile = get_contribution_profile(conn, "self")
     caps = get_current_contribution_caps(conn)
     base_year = date.fromisoformat(caps["effective_date"]).year
@@ -153,14 +153,18 @@ def test_tsp_max_mode_contributes_the_full_cap_split_by_ratio(tmp_path):
         profile, caps, salary=50_000, date_of_birth=f"{base_year - 30}-01-01",
         year=base_year, cap_base_year=base_year, include_catchup=False,
     )
-    # Equal weights -> 50/50 split of the full cap, regardless of salary.
     assert result["tsp_traditional"] == pytest.approx(result["tsp_roth"])
     assert result["tsp_traditional"] + result["tsp_roth"] == pytest.approx(caps["elective_deferral_limit"])
 
 
-def test_tsp_max_mode_defaults_to_50_50_with_no_weights_set(tmp_path):
+def test_tsp_max_mode_all_roth_ignores_the_now_irrelevant_pct_fields(tmp_path):
+    # Regression: maxing out used to infer the split from tsp_traditional_pct/
+    # tsp_roth_pct, so leaving both at 0 (as someone with only a Roth TSP
+    # naturally would) silently fell back to a 50/50 split. roth_share=1.0
+    # must give 100% Roth regardless of what's in those two fields.
     conn = make_conn(tmp_path)
-    set_contribution_profile(conn, "self", tsp_max=True)  # both pct fields left at 0
+    set_contribution_profile(conn, "self", tsp_traditional_pct=0, tsp_roth_pct=0,
+                              tsp_max=True, tsp_roth_share=1.0)
     profile = get_contribution_profile(conn, "self")
     caps = get_current_contribution_caps(conn)
     base_year = date.fromisoformat(caps["effective_date"]).year
@@ -169,13 +173,48 @@ def test_tsp_max_mode_defaults_to_50_50_with_no_weights_set(tmp_path):
         profile, caps, salary=50_000, date_of_birth=f"{base_year - 30}-01-01",
         year=base_year, cap_base_year=base_year, include_catchup=False,
     )
-    assert result["tsp_traditional"] == pytest.approx(caps["elective_deferral_limit"] / 2)
-    assert result["tsp_roth"] == pytest.approx(caps["elective_deferral_limit"] / 2)
+    assert result["tsp_traditional"] == 0
+    assert result["tsp_roth"] == pytest.approx(caps["elective_deferral_limit"])
 
 
-def test_ira_max_mode_contributes_the_full_cap(tmp_path):
+def test_tsp_max_mode_is_zero_with_no_salary(tmp_path):
+    # TSP is a payroll deduction -- maxing out means nothing without wages.
     conn = make_conn(tmp_path)
-    set_contribution_profile(conn, "self", ira_traditional_annual=1, ira_roth_annual=3, ira_max=True)
+    set_contribution_profile(conn, "self", tsp_max=True, tsp_roth_share=1.0)
+    profile = get_contribution_profile(conn, "self")
+    caps = get_current_contribution_caps(conn)
+    base_year = date.fromisoformat(caps["effective_date"]).year
+
+    result = compute_contributions_for_year(
+        profile, caps, salary=0, date_of_birth=f"{base_year - 30}-01-01",
+        year=base_year, cap_base_year=base_year, include_catchup=False,
+    )
+    assert result["tsp_traditional"] == 0
+    assert result["tsp_roth"] == 0
+    assert result["agency_match"] == 0
+
+
+def test_ira_max_mode_all_roth_works_with_zero_salary(tmp_path):
+    # The motivating case: a non-earning spouse's Roth IRA (funded by the
+    # other spouse's income) -- IRA contributions aren't tied to this
+    # person's own wages at all, unlike TSP.
+    conn = make_conn(tmp_path)
+    set_contribution_profile(conn, "self", ira_max=True, ira_roth_share=1.0)
+    profile = get_contribution_profile(conn, "self")
+    caps = get_current_contribution_caps(conn)
+    base_year = date.fromisoformat(caps["effective_date"]).year
+
+    result = compute_contributions_for_year(
+        profile, caps, salary=0, date_of_birth=f"{base_year - 30}-01-01",
+        year=base_year, cap_base_year=base_year, include_catchup=False,
+    )
+    assert result["ira_traditional"] == 0
+    assert result["ira_roth"] == pytest.approx(caps["ira_limit"])
+
+
+def test_ira_max_mode_splits_by_explicit_roth_share(tmp_path):
+    conn = make_conn(tmp_path)
+    set_contribution_profile(conn, "self", ira_max=True, ira_roth_share=0.25)
     profile = get_contribution_profile(conn, "self")
     caps = get_current_contribution_caps(conn)
     base_year = date.fromisoformat(caps["effective_date"]).year
@@ -184,9 +223,8 @@ def test_ira_max_mode_contributes_the_full_cap(tmp_path):
         profile, caps, salary=50_000, date_of_birth=f"{base_year - 30}-01-01",
         year=base_year, cap_base_year=base_year, include_catchup=False,
     )
-    assert result["ira_traditional"] + result["ira_roth"] == pytest.approx(caps["ira_limit"])
-    # 1:3 weight ratio preserved.
-    assert result["ira_roth"] == pytest.approx(result["ira_traditional"] * 3)
+    assert result["ira_roth"] == pytest.approx(caps["ira_limit"] * 0.25)
+    assert result["ira_traditional"] == pytest.approx(caps["ira_limit"] * 0.75)
 
 
 def test_tsp_max_mode_tracks_cap_growth_across_years(tmp_path):

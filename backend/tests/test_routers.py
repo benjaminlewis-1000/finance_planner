@@ -221,11 +221,33 @@ def test_contribution_projection_without_profile_still_shows_salary_and_caps(cli
     assert body["rows"][0]["tsp_traditional"] == 0
 
 
-def test_contribution_projection_400_without_salary_profile(client):
+def test_contribution_projection_works_with_no_salary_profile_at_all(client):
+    # The motivating case: a non-earning spouse's Roth IRA, funded by the
+    # other spouse's income -- must not require a salary profile at all.
     api, conn = client
     seed_household(conn)
-    resp = api.get("/assumptions/contribution-projection/self")
-    assert resp.status_code == 400
+    api.put("/assumptions/contribution-profile/self", json={
+        "ira_max": True, "ira_roth_share": 1.0,
+    })
+
+    resp = api.get("/assumptions/contribution-projection/self", params={"num_years": 3})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["rows"][0]["salary"] == 0
+    assert body["rows"][0]["tsp_traditional"] == 0  # TSP needs wages, correctly zero
+    assert body["rows"][0]["ira_roth"] > 0  # IRA doesn't need this person's own wages
+
+
+def test_contribution_preview_works_with_no_salary_profile_at_all(client):
+    api, conn = client
+    seed_household(conn)
+    resp = api.get("/assumptions/contribution-preview/self", params={
+        "ira_max": True, "ira_roth_share": 1.0,
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["salary_used"] == 0
+    assert body["ira_roth"] > 0
 
 
 def test_pension_preview_uses_salary_profile_for_high_3(client):

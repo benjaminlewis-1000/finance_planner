@@ -129,7 +129,10 @@ def _show_contribution_projection(owner: str) -> None:
     display_df = df[list(table_cols)].rename(columns=table_cols)
 
     def _highlight_cap_change(row):
-        style = "background-color: #fff3b0" if cap_changed.loc[row.name] else ""
+        # Explicit text color too -- a background-only style inherits the
+        # theme's default text color, which is unreadable (white-on-light)
+        # in dark mode.
+        style = "background-color: #ffb300; color: #000000" if cap_changed.loc[row.name] else ""
         return [style] * len(row)
 
     st.dataframe(
@@ -237,36 +240,59 @@ def section_assumptions():
     for owner in owners:
         existing_ctrb = api("GET", f"/assumptions/contribution-profile/{owner}", allow_statuses=(404,))
         st.markdown(f"**{owner}**")
-        c1, c2, c3 = st.columns(3)
-        tsp_traditional_pct = c1.number_input(
-            "TSP traditional (%)",
-            value=float(existing_ctrb["tsp_traditional_pct"]) * 100 if existing_ctrb else 0.0,
-            step=0.5, key=f"tsp_trad_{owner}",
-        )
-        tsp_roth_pct = c2.number_input(
-            "TSP Roth (%)", value=float(existing_ctrb["tsp_roth_pct"]) * 100 if existing_ctrb else 0.0,
-            step=0.5, key=f"tsp_roth_{owner}",
-        )
-        tsp_max = c3.checkbox(
+
+        tsp_max = st.checkbox(
             "Max out TSP", value=bool(existing_ctrb["tsp_max"]) if existing_ctrb else False,
             key=f"tsp_max_{owner}",
-            help="Contribute the full IRS cap each year as it grows, split traditional:Roth by the ratio of the two % fields above.",
+            help="Contribute the full IRS cap each year as it grows, instead of a fixed %.",
         )
-        c1, c2, c3 = st.columns(3)
-        ira_traditional = c1.number_input(
-            "IRA traditional ($/year)",
-            value=float(existing_ctrb["ira_traditional_annual"]) if existing_ctrb else 0.0,
-            step=500.0, key=f"ira_trad_{owner}",
-        )
-        ira_roth = c2.number_input(
-            "Roth IRA ($/year)", value=float(existing_ctrb["ira_roth_annual"]) if existing_ctrb else 0.0,
-            step=500.0, key=f"ira_roth_{owner}",
-        )
-        ira_max = c3.checkbox(
+        if tsp_max:
+            tsp_traditional_pct = tsp_roth_pct = 0.0  # unused while maxed out
+            tsp_roth_share_pct = st.slider(
+                "Roth share of the maxed-out TSP contribution (%)", 0, 100,
+                int(float(existing_ctrb["tsp_roth_share"]) * 100) if existing_ctrb else 50,
+                key=f"tsp_roth_share_{owner}",
+            )
+            tsp_roth_share = tsp_roth_share_pct / 100
+        else:
+            c1, c2 = st.columns(2)
+            tsp_traditional_pct = c1.number_input(
+                "TSP traditional (%)",
+                value=float(existing_ctrb["tsp_traditional_pct"]) * 100 if existing_ctrb else 0.0,
+                step=0.5, key=f"tsp_trad_{owner}",
+            )
+            tsp_roth_pct = c2.number_input(
+                "TSP Roth (%)", value=float(existing_ctrb["tsp_roth_pct"]) * 100 if existing_ctrb else 0.0,
+                step=0.5, key=f"tsp_roth_{owner}",
+            )
+            tsp_roth_share = float(existing_ctrb["tsp_roth_share"]) if existing_ctrb else 0.5  # unused, kept as-is
+
+        ira_max = st.checkbox(
             "Max out IRA", value=bool(existing_ctrb["ira_max"]) if existing_ctrb else False,
             key=f"ira_max_{owner}",
-            help="Contribute the full IRA cap each year as it grows, split traditional:Roth by the ratio of the two $ fields above.",
+            help="Contribute the full IRA cap each year as it grows, instead of a fixed $ amount. Works even with no salary (e.g. a spousal IRA).",
         )
+        if ira_max:
+            ira_traditional = ira_roth = 0.0  # unused while maxed out
+            ira_roth_share_pct = st.slider(
+                "Roth share of the maxed-out IRA contribution (%)", 0, 100,
+                int(float(existing_ctrb["ira_roth_share"]) * 100) if existing_ctrb else 100,
+                key=f"ira_roth_share_{owner}",
+            )
+            ira_roth_share = ira_roth_share_pct / 100
+        else:
+            c1, c2 = st.columns(2)
+            ira_traditional = c1.number_input(
+                "IRA traditional ($/year)",
+                value=float(existing_ctrb["ira_traditional_annual"]) if existing_ctrb else 0.0,
+                step=500.0, key=f"ira_trad_{owner}",
+            )
+            ira_roth = c2.number_input(
+                "Roth IRA ($/year)", value=float(existing_ctrb["ira_roth_annual"]) if existing_ctrb else 0.0,
+                step=500.0, key=f"ira_roth_{owner}",
+            )
+            ira_roth_share = float(existing_ctrb["ira_roth_share"]) if existing_ctrb else 1.0  # unused, kept as-is
+
         taxable_annual = st.number_input(
             "Taxable investing ($/year, no IRS cap)",
             value=float(existing_ctrb["taxable_annual"]) if existing_ctrb else 0.0,
@@ -275,16 +301,18 @@ def section_assumptions():
         if st.button(f"Save contribution profile ({owner})", key=f"save_ctrb_{owner}"):
             api("PUT", f"/assumptions/contribution-profile/{owner}", json={
                 "tsp_traditional_pct": tsp_traditional_pct / 100, "tsp_roth_pct": tsp_roth_pct / 100,
-                "tsp_max": tsp_max,
-                "ira_traditional_annual": ira_traditional, "ira_roth_annual": ira_roth, "ira_max": ira_max,
+                "tsp_max": tsp_max, "tsp_roth_share": tsp_roth_share,
+                "ira_traditional_annual": ira_traditional, "ira_roth_annual": ira_roth,
+                "ira_max": ira_max, "ira_roth_share": ira_roth_share,
                 "taxable_annual": taxable_annual,
             })
             st.success("Saved.")
 
         preview = api("GET", f"/assumptions/contribution-preview/{owner}", allow_statuses=(400,), params={
             "tsp_traditional_pct": tsp_traditional_pct / 100, "tsp_roth_pct": tsp_roth_pct / 100,
-            "tsp_max": tsp_max,
-            "ira_traditional_annual": ira_traditional, "ira_roth_annual": ira_roth, "ira_max": ira_max,
+            "tsp_max": tsp_max, "tsp_roth_share": tsp_roth_share,
+            "ira_traditional_annual": ira_traditional, "ira_roth_annual": ira_roth,
+            "ira_max": ira_max, "ira_roth_share": ira_roth_share,
             "taxable_annual": taxable_annual,
         })
         if preview and preview.get("has_contribution_profile"):

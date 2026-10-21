@@ -19,8 +19,9 @@ def assumptions_fingerprint(conn: sqlite3.Connection) -> dict:
             "SELECT owner, current_salary, annual_increase_pct, updated_at FROM salary_profiles ORDER BY owner"
         ),
         "contribution_profiles": rows(
-            "SELECT owner, tsp_traditional_pct, tsp_roth_pct, tsp_max, ira_traditional_annual, "
-            "ira_roth_annual, ira_max, taxable_annual, updated_at FROM contribution_profiles ORDER BY owner"
+            "SELECT owner, tsp_traditional_pct, tsp_roth_pct, tsp_max, tsp_roth_share, "
+            "ira_traditional_annual, ira_roth_annual, ira_max, ira_roth_share, taxable_annual, updated_at "
+            "FROM contribution_profiles ORDER BY owner"
         ),
         "current_contribution_caps": rows(
             "SELECT id, effective_date, elective_deferral_limit, elective_deferral_catchup_50, "

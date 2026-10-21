@@ -36,26 +36,29 @@ def _now() -> str:
 def set_contribution_profile(conn: sqlite3.Connection, owner: str, tsp_traditional_pct: float = 0,
                               tsp_roth_pct: float = 0, ira_traditional_annual: float = 0,
                               ira_roth_annual: float = 0, taxable_annual: float = 0,
-                              tsp_max: bool = False, ira_max: bool = False) -> None:
+                              tsp_max: bool = False, ira_max: bool = False,
+                              tsp_roth_share: float = 0.5, ira_roth_share: float = 1.0) -> None:
     now = _now()
     conn.execute(
         """
         INSERT INTO contribution_profiles
-            (owner, tsp_traditional_pct, tsp_roth_pct, tsp_max, ira_traditional_annual,
-             ira_roth_annual, ira_max, taxable_annual, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (owner, tsp_traditional_pct, tsp_roth_pct, tsp_max, tsp_roth_share, ira_traditional_annual,
+             ira_roth_annual, ira_max, ira_roth_share, taxable_annual, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(owner) DO UPDATE SET
             tsp_traditional_pct = excluded.tsp_traditional_pct,
             tsp_roth_pct = excluded.tsp_roth_pct,
             tsp_max = excluded.tsp_max,
+            tsp_roth_share = excluded.tsp_roth_share,
             ira_traditional_annual = excluded.ira_traditional_annual,
             ira_roth_annual = excluded.ira_roth_annual,
             ira_max = excluded.ira_max,
+            ira_roth_share = excluded.ira_roth_share,
             taxable_annual = excluded.taxable_annual,
             updated_at = excluded.updated_at
         """,
-        (owner, tsp_traditional_pct, tsp_roth_pct, int(tsp_max), ira_traditional_annual,
-         ira_roth_annual, int(ira_max), taxable_annual, now, now),
+        (owner, tsp_traditional_pct, tsp_roth_pct, int(tsp_max), tsp_roth_share, ira_traditional_annual,
+         ira_roth_annual, int(ira_max), ira_roth_share, taxable_annual, now, now),
     )
     conn.commit()
 
@@ -175,25 +178,20 @@ def fers_match_pct(employee_pct: float) -> float:
 
 # --- putting it together for one person/year ---------------------------------
 
-def _split(total: float, traditional_weight: float, roth_weight: float) -> tuple[float, float]:
-    """Splits a total by the ratio of two weights, defaulting to 50/50 when
-    both weights are zero (e.g. 'max out' ticked with no %/$ entered yet)."""
-    weight_sum = traditional_weight + roth_weight
-    if weight_sum <= 0:
-        return total / 2, total / 2
-    return total * traditional_weight / weight_sum, total * roth_weight / weight_sum
-
-
 def compute_contributions_for_year(profile, caps: sqlite3.Row, salary: float,
                                     date_of_birth: str, year: int, cap_base_year: int,
                                     include_catchup: bool) -> dict:
     """Desired $ amounts from the profile's percentages/flat amounts, scaled
     down proportionally if they'd exceed that year's projected cap -- or, in
-    'max out' mode, the full cap itself, split traditional:Roth by the ratio
-    of the profile's own %/$ fields (50/50 if both are zero)."""
+    'max out' mode, the full cap itself, split traditional:Roth by the
+    profile's explicit *_roth_share (not inferred from the %/$ fields, which
+    a maxed-out person may reasonably leave at 0)."""
     tsp_cap = elective_deferral_cap(caps, cap_base_year, year, date_of_birth, include_catchup)
     if profile["tsp_max"]:
-        tsp_traditional, tsp_roth = _split(tsp_cap, profile["tsp_traditional_pct"], profile["tsp_roth_pct"])
+        # TSP is a payroll deduction -- maxing out means nothing without wages.
+        tsp_total = tsp_cap if salary > 0 else 0.0
+        tsp_roth = tsp_total * profile["tsp_roth_share"]
+        tsp_traditional = tsp_total - tsp_roth
     else:
         desired_tsp_traditional = salary * profile["tsp_traditional_pct"]
         desired_tsp_roth = salary * profile["tsp_roth_pct"]
@@ -215,9 +213,10 @@ def compute_contributions_for_year(profile, caps: sqlite3.Row, salary: float,
 
     this_ira_cap = ira_cap(caps, cap_base_year, year, date_of_birth, include_catchup)
     if profile["ira_max"]:
-        ira_traditional, ira_roth = _split(
-            this_ira_cap, profile["ira_traditional_annual"], profile["ira_roth_annual"],
-        )
+        # IRA contributions aren't tied to this person's own wages (e.g. a
+        # spousal Roth IRA funded by the other spouse's earned income).
+        ira_roth = this_ira_cap * profile["ira_roth_share"]
+        ira_traditional = this_ira_cap - ira_roth
     else:
         desired_ira_total = profile["ira_traditional_annual"] + profile["ira_roth_annual"]
         if desired_ira_total > this_ira_cap and desired_ira_total > 0:

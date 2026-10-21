@@ -125,16 +125,19 @@ def init_db(conn: sqlite3.Connection) -> None:
         -- Agency match isn't stored here -- it's computed from the TSP
         -- percentages via the real FERS match formula in contributions.py.
         -- tsp_max/ira_max: "contribute up to that year's projected cap"
-        -- instead of a fixed %/$ -- the pct/$ fields become the
-        -- traditional:Roth split ratio in that mode (see contributions.py).
+        -- instead of a fixed %/$ -- *_roth_share (0-1) says how that cap
+        -- splits traditional:Roth, kept separate from the %/$ fields since
+        -- a maxed-out person may reasonably leave those at 0.
         CREATE TABLE IF NOT EXISTS contribution_profiles (
             owner TEXT PRIMARY KEY CHECK (owner IN ('self', 'spouse')),
             tsp_traditional_pct REAL NOT NULL DEFAULT 0,
             tsp_roth_pct REAL NOT NULL DEFAULT 0,
             tsp_max INTEGER NOT NULL DEFAULT 0,
+            tsp_roth_share REAL NOT NULL DEFAULT 0.5,
             ira_traditional_annual REAL NOT NULL DEFAULT 0,
             ira_roth_annual REAL NOT NULL DEFAULT 0,
             ira_max INTEGER NOT NULL DEFAULT 0,
+            ira_roth_share REAL NOT NULL DEFAULT 1.0,
             taxable_annual REAL NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -202,6 +205,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     _migrate_account_mappings_for_mixed_bucket(conn)
     _migrate_account_mappings_add_balance_column(conn)
     _migrate_contribution_profiles_add_max_columns(conn)
+    _migrate_contribution_profiles_add_roth_share_columns(conn)
 
 
 def _migrate_account_mappings_for_mixed_bucket(conn: sqlite3.Connection) -> None:
@@ -267,4 +271,16 @@ def _migrate_contribution_profiles_add_max_columns(conn: sqlite3.Connection) -> 
         return
     conn.execute("ALTER TABLE contribution_profiles ADD COLUMN tsp_max INTEGER NOT NULL DEFAULT 0")
     conn.execute("ALTER TABLE contribution_profiles ADD COLUMN ira_max INTEGER NOT NULL DEFAULT 0")
+    conn.commit()
+
+
+def _migrate_contribution_profiles_add_roth_share_columns(conn: sqlite3.Connection) -> None:
+    """A pre-existing contribution_profiles table (from before 'max out'
+    split by an explicit Roth share rather than the %/$ fields) has no
+    *_roth_share columns."""
+    columns = [row["name"] for row in conn.execute("PRAGMA table_info(contribution_profiles)").fetchall()]
+    if "tsp_roth_share" in columns:
+        return
+    conn.execute("ALTER TABLE contribution_profiles ADD COLUMN tsp_roth_share REAL NOT NULL DEFAULT 0.5")
+    conn.execute("ALTER TABLE contribution_profiles ADD COLUMN ira_roth_share REAL NOT NULL DEFAULT 1.0")
     conn.commit()

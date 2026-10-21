@@ -131,10 +131,14 @@ def _hfp_dataframe(conn, owner: str, owners: list[str], years: list[int], date_o
                 if year >= step_year:
                     wages_by_year[year] = step["annual_amount"]
 
-    # Wages (and therefore contributions, below) stop at separation -- you
-    # can't earn a federal salary or contribute to TSP/IRA after leaving.
+    # Wages stop at separation -- you can't earn a federal salary after
+    # leaving. (Contributions, below, get their own year range: IRA/taxable
+    # don't depend on this person having any wages at all -- e.g. a spousal
+    # Roth IRA funded by the other spouse's income -- so they must not be
+    # silently limited to years wages_by_year happens to have an entry for.)
     if separation_year is not None:
         wages_by_year = {year: amount for year, amount in wages_by_year.items() if year < separation_year}
+    contribution_years = [y for y in years if separation_year is None or y < separation_year]
 
     events_by_year: dict[int, float] = {}
     for event in event_rows:
@@ -151,7 +155,8 @@ def _hfp_dataframe(conn, owner: str, owners: list[str], years: list[int], date_o
     if contribution_profile is not None:
         caps = get_current_contribution_caps(conn)
         cap_base_year = date.fromisoformat(caps["effective_date"]).year
-        for year, salary in wages_by_year.items():
+        for year in contribution_years:
+            salary = wages_by_year.get(year, 0)
             c = compute_contributions_for_year(
                 contribution_profile, caps, salary, date_of_birth, year, cap_base_year, include_catchup,
             )
