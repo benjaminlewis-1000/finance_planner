@@ -26,11 +26,11 @@ require_authelia_session()
 
 # --- tiny API client ----------------------------------------------------------
 
-def api(method: str, path: str, allow_statuses: tuple[int, ...] = (), **kwargs):
+def api(method: str, path: str, allow_statuses: tuple[int, ...] = (), timeout: float = 30, **kwargs):
     """allow_statuses lets a caller treat a specific non-2xx status as a
     normal, silent "not found" rather than an error banner -- e.g. a
     profile that simply hasn't been created yet, not a real failure."""
-    resp = requests.request(method, f"{BACKEND_URL}{path}", timeout=30, **kwargs)
+    resp = requests.request(method, f"{BACKEND_URL}{path}", timeout=timeout, **kwargs)
     if not resp.ok:
         if resp.status_code in allow_statuses:
             return None
@@ -621,11 +621,15 @@ def _scenario_inputs(owners: list[str], key_prefix: str) -> dict:
 
     objective = st.selectbox("Objective", ["maxSpending", "maxBequest"], key=f"{key_prefix}_objective")
     bequest = st.number_input("Bequest (today's $)", value=0.0, step=10000.0, key=f"{key_prefix}_bequest")
+    allow_roth_conversions = st.checkbox(
+        "Allow Roth conversions", value=True, key=f"{key_prefix}_allow_roth",
+        help="Uncheck to compare against a scenario with no Roth conversions at all.",
+    )
 
     return {
         "separation_date": separation_date,
         "ss_claiming_age": ss_claiming_age, "include_catchup_contributions": include_catchup,
-        "objective": objective, "bequest": bequest,
+        "objective": objective, "bequest": bequest, "allow_roth_conversions": allow_roth_conversions,
     }
 
 
@@ -659,11 +663,101 @@ def _show_pension_estimates(owners: list[str], scenario: dict) -> None:
         st.caption("No pension profile set for anyone in this household.")
 
 
-def _show_solve_result(result: dict):
+def _separation_years(separation_date: dict) -> dict:
+    return {owner: date.fromisoformat(iso).year for owner, iso in separation_date.items() if iso}
+
+
+def _show_solve_result(result: dict, separation_years: dict | None = None):
     st.write(f"Status: **{result['case_status']}**")
     st.caption("From cache" if result["from_cache"] else "Freshly solved")
-    st.subheader("Key metrics")
-    st.json(result["metrics"])
+
+    yearly = result.get("yearly") or []
+    if not yearly:
+        st.info("No year-by-year data available for this solve.")
+        with st.expander("Raw metrics / summary"):
+            st.json(result["metrics"])
+            st.json(result["summary"])
+        return
+
+    df = pd.DataFrame(yearly).set_index("year")
+
+    retirement_year = min(separation_years.values()) if separation_years else None
+    if retirement_year is not None and retirement_year in df.index:
+        row = df.loc[retirement_year]
+        st.subheader(f"At retirement ({retirement_year})")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total account balance", f"${row['total_assets']:,.0f}")
+        c2.metric("Net worth", f"${row['net_worth']:,.0f}")
+        c3.metric("Yearly spending", f"${row['net_spending']:,.0f}")
+        c4.metric("Monthly spending", f"${row['net_spending'] / 12:,.0f}")
+    elif retirement_year is not None:
+        st.caption(f"Separation year {retirement_year} falls outside the solved horizon.")
+
+    st.subheader("Account balances by year")
+    st.area_chart(df[["taxable", "tax_deferred", "tax_free", "hsa"]])
+
+    st.subheader("Net worth by year")
+    st.line_chart(df[["net_worth", "liquid_net_worth"]])
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Yearly spending")
+        st.bar_chart(df[["net_spending"]])
+    with col2:
+        st.subheader("Yearly taxes")
+        st.bar_chart(df[["total_tax"]])
+
+    has_conversions = (df["roth_conversions"] > 0).any()
+
+    st.subheader("Marginal vs. effective federal tax rate")
+    rate_df = df[["marginal_federal_rate", "effective_federal_rate"]].rename(columns={
+        "marginal_federal_rate": "marginal rate (next dollar)",
+        "effective_federal_rate": "effective rate (avg. on ordinary income)",
+    }) * 100
+    st.line_chart(rate_df)
+    st.caption(
+        "Marginal is the rate on your *next* dollar of ordinary income -- what a Roth conversion "
+        "decision actually hinges on. Effective is total federal tax paid over total taxable "
+        "ordinary income -- the blended average people usually mean by \"my tax bracket.\" "
+        "Effective is always lower than marginal; the gap between them is why a year can look "
+        "fine \"on average\" while the marginal cost of one more dollar withdrawn is high."
+    )
+
+    if has_conversions:
+        st.subheader("Roth conversions by year")
+        st.bar_chart(df[["roth_conversions"]])
+
+        conversion_years = df[df["roth_conversions"] > 0]
+        avg_conversion_rate = conversion_years["marginal_federal_rate"].mean()
+        later_years = df[df.index > conversion_years.index.max()]
+        peak_future_marginal = (later_years if not later_years.empty else df)["marginal_federal_rate"].max()
+        peak_future_effective = (later_years if not later_years.empty else df)["effective_federal_rate"].max()
+        if peak_future_marginal > avg_conversion_rate:
+            st.caption(
+                f"Why Owl converts: your modeled marginal federal rate during these conversion "
+                f"years averages ~{avg_conversion_rate * 100:.0f}%, versus a projected marginal "
+                f"peak of ~{peak_future_marginal * 100:.0f}% later once RMDs, pension, and Social "
+                f"Security stack up -- even though the *effective* rate in that later peak year "
+                f"(~{peak_future_effective * 100:.0f}%) may look unremarkable on its own. Paying "
+                f"tax on the conversion now, at the lower marginal rate, beats paying it later at "
+                f"the higher one. (Owl also weighs IRMAA/Medicare, NIIT, and ACA-subsidy effects "
+                f"beyond the plain bracket shown here.)"
+            )
+        else:
+            st.caption(
+                f"Roth conversions occurred, but the modeled marginal rate during those years "
+                f"(~{avg_conversion_rate * 100:.0f}%) isn't clearly lower than the later marginal "
+                f"peak (~{peak_future_marginal * 100:.0f}%) -- the benefit is likely coming from "
+                f"avoiding future RMDs, IRMAA, or NIIT effects rather than pure bracket arbitrage."
+            )
+        st.caption("Uncheck \"Allow Roth conversions\" above to compare against a no-conversion scenario.")
+        st.caption("Uncheck \"Allow Roth conversions\" above to compare against a no-conversion scenario.")
+
+    with st.expander("Year-by-year table"):
+        st.dataframe(df)
+    with st.expander("Raw metrics / summary"):
+        st.json(result["metrics"])
+        st.json(result["summary"])
 
 
 def section_solve():
@@ -690,7 +784,7 @@ def section_solve():
             **scenario, "spreadsheet_id": spreadsheet_id, "force_recalculate": force_recalculate,
         })
         if result:
-            _show_solve_result(result)
+            _show_solve_result(result, _separation_years(scenario["separation_date"]))
 
 
 def section_scenarios():
@@ -711,7 +805,7 @@ def section_scenarios():
             })
             if result:
                 st.success(f"Saved '{name}'.")
-                _show_solve_result(result["result"])
+                _show_solve_result(result["result"], _separation_years(scenario["separation_date"]))
 
     st.subheader("Saved scenarios")
     scenarios = api("GET", "/scenarios") or []
@@ -724,10 +818,58 @@ def section_scenarios():
     if selected:
         detail = api("GET", f"/scenarios/{selected}")
         if detail:
-            _show_solve_result(detail["solve_result"])
+            saved_separation_date = (detail.get("case_params_snapshot") or {}).get("separation_date", {})
+            _show_solve_result(detail["solve_result"], _separation_years(saved_separation_date))
             if st.button(f"Delete '{selected}'"):
                 api("DELETE", f"/scenarios/{selected}")
                 st.rerun()
+
+
+def section_system():
+    st.header("System")
+    st.subheader("owlplanner version")
+
+    status = api("GET", "/system/owlplanner/status")
+    if not status:
+        return
+
+    c1, c2 = st.columns(2)
+    c1.metric("Installed", status["installed_version"])
+    c2.metric("Latest on PyPI", status["latest_version"])
+
+    if status["up_to_date"]:
+        st.success("Already on the latest owlplanner release.")
+        return
+
+    st.info(
+        f"A newer owlplanner ({status['latest_version']}) is available. Testing it won't change "
+        f"anything running right now -- it installs into a throwaway virtualenv, runs the real "
+        f"backend test suite against it, and discards the result. This can take a few minutes."
+    )
+    if st.button("Test upgrade"):
+        with st.spinner(f"Installing owlplanner {status['latest_version']} into a scratch venv and running the test suite..."):
+            result = api("POST", "/system/owlplanner/test-upgrade", timeout=900)
+        if result:
+            st.session_state["owlplanner_test_result"] = result
+
+    result = st.session_state.get("owlplanner_test_result")
+    if result and result.get("ran"):
+        if result["test_passed"]:
+            st.success(
+                f"owlplanner {result['latest_version']} passed the full test suite in "
+                f"{result['test_duration_seconds']:.0f}s. Safe to apply manually: bump the pin in "
+                f"backend/requirements.txt to {result['latest_version']}, then "
+                f"`docker compose up -d --build backend streamlit`."
+            )
+        else:
+            st.error(
+                f"owlplanner {result['latest_version']} failed the test suite "
+                f"(exit code {result['test_returncode']}) after {result['test_duration_seconds']:.0f}s. "
+                f"Nothing running was touched -- the running app is still on "
+                f"{result['installed_version']}. Review the output below before upgrading manually."
+            )
+        with st.expander("Test output"):
+            st.code(result["test_output"])
 
 
 # --- navigation -----------------------------------------------------------------
@@ -739,6 +881,7 @@ SECTIONS = {
     "Tiller accounts": section_tiller,
     "Solve": section_solve,
     "Scenarios": section_scenarios,
+    "System": section_system,
 }
 
 st.sidebar.title("Owl Retirement Dashboard")

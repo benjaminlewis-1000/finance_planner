@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
 from app.db import get_connection, init_db
-from app.routers import assumptions, scenarios, solve, tiller
+from app.routers import assumptions, scenarios, solve, system, tiller
 
 
 @asynccontextmanager
@@ -20,6 +20,7 @@ app.include_router(assumptions.router)
 app.include_router(tiller.router)
 app.include_router(solve.router)
 app.include_router(scenarios.router)
+app.include_router(system.router)
 
 FAVICON_PATH = Path(__file__).resolve().parent / "static" / "favicon.png"
 

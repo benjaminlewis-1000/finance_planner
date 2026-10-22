@@ -136,6 +136,76 @@ def test_hfp_dataframe_no_contribution_profile_means_zero_contributions(tmp_path
     assert df["anticipated wages"].iloc[0] > 0
 
 
+def test_solve_scenario_includes_yearly_breakdown(tmp_path):
+    conn = make_household(tmp_path)
+    scenario = make_scenario()
+    fingerprint = {"salary_steps": 1}
+
+    result = solve_scenario(conn, FAKE_ACCOUNTS, scenario, fingerprint)
+    yearly = result["yearly"]
+    assert len(yearly) > 0
+
+    years = [row["year"] for row in yearly]
+    assert years == sorted(years)  # chronological, one row per solved year
+    assert years[0] == date.today().year
+
+    first = yearly[0]
+    for key in ("taxable", "tax_deferred", "tax_free", "hsa", "total_assets",
+                "net_worth", "liquid_net_worth", "net_spending", "total_tax",
+                "wages", "pensions", "social_security"):
+        assert key in first
+
+    # Starting balances roughly match the Tiller pull ($80k taxable, $320k
+    # tax-deferred, $135k Roth -- allow drift since Owl grows/consumes within
+    # year one depending on timing assumptions).
+    assert first["total_assets"] > 400_000
+
+
+def test_allow_roth_conversions_false_disables_conversions_entirely(tmp_path):
+    conn = make_household(tmp_path)
+    scenario = make_scenario()
+    scenario.allow_roth_conversions = False
+    fingerprint = {"x": 1}
+
+    result = solve_scenario(conn, FAKE_ACCOUNTS, scenario, fingerprint, force_recalculate=True)
+    assert result["case_status"] == "solved"
+    assert all(row["roth_conversions"] == 0 for row in result["yearly"])
+
+
+def test_allow_roth_conversions_true_is_the_default_and_can_convert(tmp_path):
+    conn = make_household(tmp_path)
+    scenario = make_scenario()
+    assert scenario.allow_roth_conversions is True
+    fingerprint = {"x": 1}
+
+    result = solve_scenario(conn, FAKE_ACCOUNTS, scenario, fingerprint, force_recalculate=True)
+    assert sum(row["roth_conversions"] for row in result["yearly"]) > 0
+
+
+def test_marginal_federal_rate_is_a_sane_bracket_fraction(tmp_path):
+    conn = make_household(tmp_path)
+    scenario = make_scenario()
+    fingerprint = {"x": 1}
+
+    result = solve_scenario(conn, FAKE_ACCOUNTS, scenario, fingerprint, force_recalculate=True)
+    for row in result["yearly"]:
+        assert 0.0 <= row["marginal_federal_rate"] <= 0.37
+
+
+def test_effective_federal_rate_is_sane_and_never_exceeds_marginal(tmp_path):
+    # Effective (average) rate on ordinary income can't exceed the marginal
+    # (next-dollar) rate -- marginal is the top slice of a progressive
+    # schedule, effective blends in everything taxed below it.
+    conn = make_household(tmp_path)
+    scenario = make_scenario()
+    fingerprint = {"x": 1}
+
+    result = solve_scenario(conn, FAKE_ACCOUNTS, scenario, fingerprint, force_recalculate=True)
+    for row in result["yearly"]:
+        assert 0.0 <= row["effective_federal_rate"] <= 0.37
+        assert row["effective_federal_rate"] <= row["marginal_federal_rate"] + 1e-9
+
+
 def test_solve_scenario_force_recalculate_bypasses_cache(tmp_path):
     conn = make_household(tmp_path)
     scenario = make_scenario()

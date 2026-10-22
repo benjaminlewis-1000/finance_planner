@@ -52,6 +52,7 @@ class ScenarioParams:
     include_catchup_contributions: dict[str, bool] = field(default_factory=dict)
     objective: str = "maxSpending"
     bequest: float = 0
+    allow_roth_conversions: bool = True
 
 
 def _bucket_balances(conn, pulled_accounts: list[dict], owners: list[str]) -> dict[str, dict[str, float]]:

@@ -22,6 +22,7 @@ class ScenarioRequest(BaseModel):
     include_catchup_contributions: dict[Owner, bool] = {}
     objective: Literal["maxSpending", "maxBequest"] = "maxSpending"
     bequest: float = 0
+    allow_roth_conversions: bool = True
     force_recalculate: bool = False
 
     def to_scenario_params(self, conn: Connection) -> ScenarioParams:
@@ -43,6 +44,7 @@ class ScenarioRequest(BaseModel):
             include_catchup_contributions=dict(self.include_catchup_contributions),
             objective=self.objective,
             bequest=self.bequest,
+            allow_roth_conversions=self.allow_roth_conversions,
         )
 
 

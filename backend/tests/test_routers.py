@@ -412,3 +412,44 @@ def test_scenarios_save_list_get_delete(client):
     resp = api.delete("/scenarios/retire-at-57")
     assert resp.status_code == 200
     assert api.get("/scenarios").json() == []
+
+
+def test_owlplanner_status_reports_up_to_date(client):
+    api, _ = client
+    with patch("app.routers.system.check_for_update", return_value={
+        "installed_version": "2026.10.10", "latest_version": "2026.10.10", "up_to_date": True,
+    }):
+        resp = api.get("/system/owlplanner/status")
+    assert resp.status_code == 200
+    assert resp.json()["up_to_date"] is True
+
+
+def test_owlplanner_test_upgrade_skips_the_test_run_when_already_current(client):
+    api, _ = client
+    with patch("app.routers.system.check_for_update", return_value={
+        "installed_version": "2026.10.10", "latest_version": "2026.10.10", "up_to_date": True,
+    }), patch("app.routers.system.test_candidate_version") as mock_test:
+        resp = api.post("/system/owlplanner/test-upgrade")
+    assert resp.status_code == 200
+    assert resp.json()["ran"] is False
+    mock_test.assert_not_called()
+
+
+def test_owlplanner_test_upgrade_runs_and_reports_result_when_outdated(client):
+    from app.system.owlplanner_upgrade import UpgradeTestResult
+
+    api, _ = client
+    with patch("app.routers.system.check_for_update", return_value={
+        "installed_version": "2026.10.10", "latest_version": "2027.1.1", "up_to_date": False,
+    }), patch(
+        "app.routers.system.test_candidate_version",
+        return_value=UpgradeTestResult("2027.1.1", True, 0, "93 passed", 42.0),
+    ) as mock_test:
+        resp = api.post("/system/owlplanner/test-upgrade")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ran"] is True
+    assert body["test_passed"] is True
+    assert body["latest_version"] == "2027.1.1"
+    mock_test.assert_called_once_with("2027.1.1")

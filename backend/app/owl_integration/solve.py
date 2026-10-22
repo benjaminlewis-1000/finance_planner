@@ -22,6 +22,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from app.owl_integration.case_builder import ScenarioParams, build_plan
+from app.owl_integration.results import yearly_breakdown
 
 
 def _now() -> str:
@@ -43,6 +44,7 @@ def compute_cache_key(pulled_accounts: list[dict], scenario: ScenarioParams, ass
         "include_catchup_contributions": scenario.include_catchup_contributions,
         "objective": scenario.objective,
         "bequest": scenario.bequest,
+        "allow_roth_conversions": scenario.allow_roth_conversions,
         "assumptions_fingerprint": assumptions_fingerprint,
     }
     serialized = json.dumps(payload, sort_keys=True)
@@ -61,12 +63,19 @@ def solve_scenario(conn: sqlite3.Connection, pulled_accounts: list[dict], scenar
             return {**json.loads(cached["result"]), "cache_key": cache_key, "from_cache": True}
 
     plan = build_plan(conn, pulled_accounts, scenario)
-    plan.solve(scenario.objective, options={"bequest": scenario.bequest})
+    solve_options = {"bequest": scenario.bequest}
+    if not scenario.allow_roth_conversions:
+        # maxRothConversion caps each individual's annual conversion ($);
+        # 0 disables conversions for everyone in one shot (noRothConversions
+        # only excludes a single named individual, not the whole household).
+        solve_options["maxRothConversion"] = 0
+    plan.solve(scenario.objective, options=solve_options)
 
     result = {
         "case_status": plan.caseStatus,
         "metrics": plan.metricsDict(),
         "summary": plan.summaryDic(),
+        "yearly": yearly_breakdown(plan) if plan.caseStatus == "solved" else [],
     }
 
     conn.execute(
