@@ -52,7 +52,8 @@ class ScenarioParams:
     include_catchup_contributions: dict[str, bool] = field(default_factory=dict)
     objective: str = "maxSpending"
     bequest: float = 0
-    allow_roth_conversions: bool = True
+    allow_roth_conversions: bool = False
+    tithing_pct: float = 0.0
 
 
 def _bucket_balances(conn, pulled_accounts: list[dict], owners: list[str]) -> dict[str, dict[str, float]]:
@@ -108,7 +109,8 @@ def _bucket_balances(conn, pulled_accounts: list[dict], owners: list[str]) -> di
 
 
 def _hfp_dataframe(conn, owner: str, owners: list[str], years: list[int], date_of_birth: str,
-                    separation_year: int | None, include_catchup: bool) -> pd.DataFrame:
+                    separation_year: int | None, include_catchup: bool,
+                    tithing_pct: float = 0.0) -> pd.DataFrame:
     """A 'joint' one-off event is split 50/50 across both people's HFP frames
     when there's a spouse, same convention as joint account balances; with no
     spouse in the household it falls entirely on 'self'."""
@@ -152,6 +154,7 @@ def _hfp_dataframe(conn, owner: str, owners: list[str], years: list[int], date_o
     tsp_traditional_by_year, tsp_roth_by_year = {}, {}
     ira_traditional_by_year, ira_roth_by_year = {}, {}
     taxable_ctrb_by_year = {}
+    employee_funded_ctrb_by_year: dict[int, float] = {}
     contribution_profile = get_contribution_profile(conn, owner)
     if contribution_profile is not None:
         caps = get_current_contribution_caps(conn)
@@ -168,10 +171,37 @@ def _hfp_dataframe(conn, owner: str, owners: list[str], years: list[int], date_o
             ira_traditional_by_year[year] = c["ira_traditional"]
             ira_roth_by_year[year] = c["ira_roth"]
             taxable_ctrb_by_year[year] = c["taxable"]
+            # Owl's own convention (plan.py: "'anticipated wages' must be
+            # entered net of all contribution columns") means every dollar
+            # contributed has to come out of wages here, or Owl treats it as
+            # free money on top of full take-home pay. Agency match is
+            # excluded -- that's employer money the employee never had.
+            employee_funded_ctrb_by_year[year] = (
+                c["tsp_traditional"] + c["tsp_roth"] + c["ira_traditional"] + c["ira_roth"] + c["taxable"]
+            )
 
-    return pd.DataFrame({
+    # Clamp this owner's own wages at 0 -- a spousal IRA funded by the OTHER
+    # spouse's income (this owner has $0 wages but a contribution profile)
+    # must not turn into negative wages here. Whatever doesn't fit against
+    # this owner's own wages is returned as a shortfall for build_plan() to
+    # net against the household's other wage-earner(s) instead, so the
+    # household's total net-of-contributions wages still comes out right.
+    # Tithe is computed on wages AFTER retirement contributions come out
+    # (per the household's own convention), so it's applied on top of that
+    # same clamped base, not on raw gross wages.
+    net_wages_by_year = {}
+    shortfall_by_year: dict[int, float] = {}
+    for year in years:
+        gross = wages_by_year.get(year, 0)
+        ctrb = employee_funded_ctrb_by_year.get(year, 0)
+        after_ctrb = max(0.0, gross - ctrb)
+        tithe = tithing_pct * after_ctrb
+        net_wages_by_year[year] = after_ctrb - tithe
+        shortfall_by_year[year] = max(0.0, ctrb - gross)
+
+    df = pd.DataFrame({
         "year": years,
-        "anticipated wages": [wages_by_year.get(year, 0) for year in years],
+        "anticipated wages": [net_wages_by_year.get(year, 0) for year in years],
         "big-ticket items": [events_by_year.get(year, 0) for year in years],
         "401k ctrb": [tsp_traditional_by_year.get(year, 0) for year in years],
         "Roth 401k ctrb": [tsp_roth_by_year.get(year, 0) for year in years],
@@ -179,6 +209,7 @@ def _hfp_dataframe(conn, owner: str, owners: list[str], years: list[int], date_o
         "Roth IRA ctrb": [ira_roth_by_year.get(year, 0) for year in years],
         "taxable ctrb": [taxable_ctrb_by_year.get(year, 0) for year in years],
     })
+    return df, shortfall_by_year
 
 
 def _pension_amount_and_age(conn, owner: str, scenario: ScenarioParams) -> tuple[float, float, float]:
@@ -245,15 +276,44 @@ def build_plan(conn, pulled_accounts: list[dict], scenario: ScenarioParams) -> o
     this_year = date.today().year
     horizon_years = list(range(this_year, this_year + max(life_expectancies) + 1))
     hfp = {}
+    shortfalls = {}
     for member in members:
         owner = member["owner"]
         sep_date = scenario.separation_date.get(owner)
-        hfp[member["display_name"]] = _hfp_dataframe(
+        df, shortfall_by_year = _hfp_dataframe(
             conn, owner, owners, horizon_years,
             date_of_birth=member["date_of_birth"],
             separation_year=sep_date.year if sep_date else None,
             include_catchup=scenario.include_catchup_contributions.get(owner, False),
+            tithing_pct=scenario.tithing_pct,
         )
+        hfp[member["display_name"]] = df
+        shortfalls[member["display_name"]] = shortfall_by_year
+
+    # A contribution this owner's own wages can't cover (e.g. a spousal IRA
+    # funded while this owner earns $0) gets netted against another member's
+    # wages here, so the household's total net-of-contributions cash is
+    # still correct even though each owner's own HFP frame was built in
+    # isolation. If nobody in the household has enough wages that year to
+    # absorb it, readHFP below will raise -- a real "can't afford this
+    # contribution" case, not something to silently paper over.
+    for iname, shortfall_by_year in shortfalls.items():
+        for year, shortfall in shortfall_by_year.items():
+            if shortfall <= 0:
+                continue
+            for other_iname, other_df in hfp.items():
+                if other_iname == iname:
+                    continue
+                row = other_df.index[other_df["year"] == year]
+                if row.empty:
+                    continue
+                available = other_df.loc[row, "anticipated wages"].iloc[0]
+                take = min(available, shortfall)
+                other_df.loc[row, "anticipated wages"] -= take
+                shortfall -= take
+                if shortfall <= 0:
+                    break
+
     plan.readHFP(hfp)
 
     pension_amounts, pension_ages, survivor_fractions = [], [], []

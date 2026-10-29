@@ -45,6 +45,7 @@ def compute_cache_key(pulled_accounts: list[dict], scenario: ScenarioParams, ass
         "objective": scenario.objective,
         "bequest": scenario.bequest,
         "allow_roth_conversions": scenario.allow_roth_conversions,
+        "tithing_pct": scenario.tithing_pct,
         "assumptions_fingerprint": assumptions_fingerprint,
     }
     serialized = json.dumps(payload, sort_keys=True)
@@ -63,7 +64,15 @@ def solve_scenario(conn: sqlite3.Connection, pulled_accounts: list[dict], scenar
             return {**json.loads(cached["result"]), "cache_key": cache_key, "from_cache": True}
 
     plan = build_plan(conn, pulled_accounts, scenario)
-    solve_options = {"bequest": scenario.bequest}
+    # units=1 forces every dollar-valued solve option (bequest, netSpending,
+    # maxRothConversion, ...) to be read as whole dollars. Confirmed directly
+    # against a real solve: without it, Owl reads these in $k, so a bequest of
+    # 500_000 (meant as $500k) was silently solved as a $500M target -- which
+    # is why it came back "infeasible" instead of the sane answer it should
+    # have given. g_n/T_n/etc. (the per-year result arrays) were never
+    # affected -- those were always whole dollars, matching the HFP/pension/SS
+    # convention case_builder.py already uses everywhere else.
+    solve_options = {"bequest": scenario.bequest, "units": 1}
     if not scenario.allow_roth_conversions:
         # maxRothConversion caps each individual's annual conversion ($);
         # 0 disables conversions for everyone in one shot (noRothConversions

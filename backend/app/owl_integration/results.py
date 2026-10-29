@@ -38,11 +38,19 @@ def _effective_federal_rate(plan, idx: int) -> float:
     (T_n / G_n) -- the blended average rate, as distinct from the marginal
     rate above. Kept on the same income base (G_n, federal-ordinary only,
     no LTCG/NIIT/state) as _marginal_federal_rate so the two are directly
-    comparable rather than mixing in taxes that follow different schedules."""
+    comparable rather than mixing in taxes that follow different schedules.
+
+    plan.T_n is not pure bracket tax -- plan.py folds the flat 10% early
+    (pre-59.5) withdrawal penalty (P_n) into it (`self.T_n += self.P_n`).
+    That penalty isn't part of the marginal bracket schedule at all, so it
+    has to be backed out here or a year with an early withdrawal reports an
+    "effective" rate higher than the marginal rate, which is impossible for
+    an actual blended-bracket average."""
     taxable_income = float(plan.G_n[idx])
     if taxable_income <= 0:
         return 0.0
-    return float(plan.T_n[idx]) / taxable_income
+    ordinary_tax = float(plan.T_n[idx]) - float(plan.P_n[idx])
+    return ordinary_tax / taxable_income
 
 
 def yearly_breakdown(plan) -> list[dict]:

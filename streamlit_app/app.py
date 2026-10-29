@@ -8,6 +8,7 @@ investing in the React/Vite build (step 8), per the build plan.
 import os
 from datetime import date
 
+import altair as alt
 import pandas as pd
 import requests
 import streamlit as st
@@ -622,14 +623,19 @@ def _scenario_inputs(owners: list[str], key_prefix: str) -> dict:
     objective = st.selectbox("Objective", ["maxSpending", "maxBequest"], key=f"{key_prefix}_objective")
     bequest = st.number_input("Bequest (today's $)", value=0.0, step=10000.0, key=f"{key_prefix}_bequest")
     allow_roth_conversions = st.checkbox(
-        "Allow Roth conversions", value=True, key=f"{key_prefix}_allow_roth",
-        help="Uncheck to compare against a scenario with no Roth conversions at all.",
+        "Allow Roth conversions", value=False, key=f"{key_prefix}_allow_roth",
+        help="Check to compare against a scenario with Roth conversions enabled.",
     )
+    tithing_pct = st.number_input(
+        "Tithing (% of wages after retirement contributions)", value=10.0, step=1.0,
+        min_value=0.0, max_value=100.0, key=f"{key_prefix}_tithing",
+    ) / 100
 
     return {
         "separation_date": separation_date,
         "ss_claiming_age": ss_claiming_age, "include_catchup_contributions": include_catchup,
         "objective": objective, "bequest": bequest, "allow_roth_conversions": allow_roth_conversions,
+        "tithing_pct": tithing_pct,
     }
 
 
@@ -667,6 +673,33 @@ def _separation_years(separation_date: dict) -> dict:
     return {owner: date.fromisoformat(iso).year for owner, iso in separation_date.items() if iso}
 
 
+def _fixed_axis_chart(df: pd.DataFrame, columns: list[str], mark: str = "line"):
+    """Altair chart with the x-axis locked to the plan's actual year range
+    and the y-axis floored at 0 -- Streamlit's native line/area/bar charts
+    allow free scroll-zoom/pan, which made it easy to zoom into a misleading
+    slice of the data. No .interactive() call here is deliberate: it's what
+    keeps the axes fixed instead of pannable/zoomable."""
+    long_df = df[columns].reset_index().melt("year", var_name="series", value_name="value")
+    x_domain = [int(df.index.min()), int(df.index.max())]
+
+    if mark == "bar":
+        x_enc = alt.X("year:O", axis=alt.Axis(title="Year"))
+    else:
+        x_enc = alt.X("year:Q", scale=alt.Scale(domain=x_domain, nice=False), axis=alt.Axis(format="d", title="Year"))
+
+    y_enc = alt.Y(
+        "value:Q",
+        scale=alt.Scale(domainMin=0, nice=True),
+        stack="zero" if mark == "area" else None,
+        title=None,
+    )
+    color_enc = alt.Color("series:N", title=None)
+
+    base = alt.Chart(long_df)
+    chart = {"line": base.mark_line(), "area": base.mark_area(), "bar": base.mark_bar()}[mark]
+    st.altair_chart(chart.encode(x=x_enc, y=y_enc, color=color_enc), use_container_width=True)
+
+
 def _show_solve_result(result: dict, separation_years: dict | None = None):
     st.write(f"Status: **{result['case_status']}**")
     st.caption("From cache" if result["from_cache"] else "Freshly solved")
@@ -694,18 +727,18 @@ def _show_solve_result(result: dict, separation_years: dict | None = None):
         st.caption(f"Separation year {retirement_year} falls outside the solved horizon.")
 
     st.subheader("Account balances by year")
-    st.area_chart(df[["taxable", "tax_deferred", "tax_free", "hsa"]])
+    _fixed_axis_chart(df, ["taxable", "tax_deferred", "tax_free", "hsa"], mark="area")
 
     st.subheader("Net worth by year")
-    st.line_chart(df[["net_worth", "liquid_net_worth"]])
+    _fixed_axis_chart(df, ["net_worth", "liquid_net_worth"], mark="line")
 
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Yearly spending")
-        st.bar_chart(df[["net_spending"]])
+        _fixed_axis_chart(df, ["net_spending"], mark="bar")
     with col2:
         st.subheader("Yearly taxes")
-        st.bar_chart(df[["total_tax"]])
+        _fixed_axis_chart(df, ["total_tax"], mark="bar")
 
     has_conversions = (df["roth_conversions"] > 0).any()
 
@@ -714,7 +747,7 @@ def _show_solve_result(result: dict, separation_years: dict | None = None):
         "marginal_federal_rate": "marginal rate (next dollar)",
         "effective_federal_rate": "effective rate (avg. on ordinary income)",
     }) * 100
-    st.line_chart(rate_df)
+    _fixed_axis_chart(rate_df, list(rate_df.columns), mark="line")
     st.caption(
         "Marginal is the rate on your *next* dollar of ordinary income -- what a Roth conversion "
         "decision actually hinges on. Effective is total federal tax paid over total taxable "
@@ -725,7 +758,7 @@ def _show_solve_result(result: dict, separation_years: dict | None = None):
 
     if has_conversions:
         st.subheader("Roth conversions by year")
-        st.bar_chart(df[["roth_conversions"]])
+        _fixed_axis_chart(df, ["roth_conversions"], mark="bar")
 
         conversion_years = df[df["roth_conversions"] > 0]
         avg_conversion_rate = conversion_years["marginal_federal_rate"].mean()

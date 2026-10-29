@@ -88,7 +88,7 @@ def test_hfp_dataframe_zeroes_wages_and_contributions_at_separation(tmp_path):
 
     years = list(range(this_year, this_year + 10))
     separation_year = this_year + 5
-    df = _hfp_dataframe(
+    df, _ = _hfp_dataframe(
         conn, owner="self", owners=["self"], years=years, date_of_birth="1988-06-01",
         separation_year=separation_year, include_catchup=False,
     )
@@ -113,12 +113,56 @@ def test_hfp_dataframe_ira_contributions_flow_with_zero_salary(tmp_path):
     set_contribution_profile(conn, owner="self", ira_roth_annual=7_000)
     # Deliberately no salary_profile and no salary_steps for "self".
 
-    df = _hfp_dataframe(
+    df, shortfall_by_year = _hfp_dataframe(
         conn, owner="self", owners=["self"], years=[this_year, this_year + 1],
         date_of_birth="1988-06-01", separation_year=None, include_catchup=False,
     )
     assert (df["anticipated wages"] == 0).all()
     assert (df["Roth IRA ctrb"] == 7_000).all()
+    # No wages of this owner's own to fund it from -- build_plan() is
+    # responsible for netting this against another household member's wages.
+    assert shortfall_by_year[this_year] == 7_000
+
+
+def test_hfp_dataframe_wages_are_net_of_employee_contributions(tmp_path):
+    """Regression test: Owl's own documented convention (plan.py: "'anticipated
+    wages' must be entered net of all contribution columns") means every
+    contribution dollar must come out of wages here, or Owl treats it as free
+    money on top of full gross pay -- inflating every account's growth for
+    every year of the plan. Agency match is the one exception: that's
+    employer money the employee never had, so it must NOT be subtracted."""
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    this_year = date.today().year
+    set_salary_profile(conn, owner="self", current_salary=100_000, annual_increase_pct=0)
+    set_contribution_profile(conn, owner="self", tsp_traditional_pct=0.10, tsp_roth_pct=0.05)
+
+    df, _ = _hfp_dataframe(
+        conn, owner="self", owners=["self"], years=[this_year], date_of_birth="1988-06-01",
+        separation_year=None, include_catchup=False,
+    )
+    tsp_traditional_employee_share = 10_000  # 10% of 100k; agency match rides along in this column too
+    tsp_roth = 5_000  # 5% of 100k
+    expected_wages = 100_000 - tsp_traditional_employee_share - tsp_roth
+    assert df["anticipated wages"].iloc[0] == expected_wages
+
+
+def test_hfp_dataframe_tithe_is_computed_after_retirement_contributions(tmp_path):
+    """Tithe base is wages AFTER retirement contributions come out, not raw
+    gross -- confirmed with the user directly, not assumed."""
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    this_year = date.today().year
+    set_salary_profile(conn, owner="self", current_salary=100_000, annual_increase_pct=0)
+    set_contribution_profile(conn, owner="self", tsp_traditional_pct=0.10, tsp_roth_pct=0.05)
+
+    df, _ = _hfp_dataframe(
+        conn, owner="self", owners=["self"], years=[this_year], date_of_birth="1988-06-01",
+        separation_year=None, include_catchup=False, tithing_pct=0.10,
+    )
+    after_contributions = 100_000 - 10_000 - 5_000  # 10% + 5% TSP contributions
+    expected_wages = after_contributions - 0.10 * after_contributions
+    assert df["anticipated wages"].iloc[0] == expected_wages
 
 
 def test_hfp_dataframe_no_contribution_profile_means_zero_contributions(tmp_path):
@@ -128,7 +172,7 @@ def test_hfp_dataframe_no_contribution_profile_means_zero_contributions(tmp_path
     set_salary_profile(conn, owner="self", current_salary=100_000, annual_increase_pct=0.03)
     # No contribution_profile set.
 
-    df = _hfp_dataframe(
+    df, _ = _hfp_dataframe(
         conn, owner="self", owners=["self"], years=[this_year], date_of_birth="1988-06-01",
         separation_year=None, include_catchup=False,
     )
@@ -161,10 +205,24 @@ def test_solve_scenario_includes_yearly_breakdown(tmp_path):
     assert first["total_assets"] > 400_000
 
 
-def test_allow_roth_conversions_false_disables_conversions_entirely(tmp_path):
+def test_bequest_option_is_read_in_whole_dollars_not_thousands(tmp_path):
+    """Regression test: solve_scenario must pass units=1 to plan.solve(), or
+    Owl reads 'bequest' in $k -- a $10,000 target would be silently solved as
+    a $10M target against a fake household worth well under $1M, and come
+    back 'infeasible' even though a real $10,000 bequest is trivially easy."""
     conn = make_household(tmp_path)
     scenario = make_scenario()
-    scenario.allow_roth_conversions = False
+    scenario.bequest = 2_000_000
+    fingerprint = {"x": 1}
+
+    result = solve_scenario(conn, FAKE_ACCOUNTS, scenario, fingerprint, force_recalculate=True)
+    assert result["case_status"] == "solved"
+
+
+def test_allow_roth_conversions_false_is_the_default_and_disables_conversions(tmp_path):
+    conn = make_household(tmp_path)
+    scenario = make_scenario()
+    assert scenario.allow_roth_conversions is False
     fingerprint = {"x": 1}
 
     result = solve_scenario(conn, FAKE_ACCOUNTS, scenario, fingerprint, force_recalculate=True)
@@ -172,10 +230,10 @@ def test_allow_roth_conversions_false_disables_conversions_entirely(tmp_path):
     assert all(row["roth_conversions"] == 0 for row in result["yearly"])
 
 
-def test_allow_roth_conversions_true_is_the_default_and_can_convert(tmp_path):
+def test_allow_roth_conversions_true_can_convert(tmp_path):
     conn = make_household(tmp_path)
     scenario = make_scenario()
-    assert scenario.allow_roth_conversions is True
+    scenario.allow_roth_conversions = True
     fingerprint = {"x": 1}
 
     result = solve_scenario(conn, FAKE_ACCOUNTS, scenario, fingerprint, force_recalculate=True)
